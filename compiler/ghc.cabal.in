@@ -683,6 +683,12 @@ Library
         GHC.Parser.String
         GHC.Parser.Types
         GHC.Parser.Utils
+        -- ghc-lisp: the s-expression front end (ghclisp/DESIGN.md)
+        GHC.Parser.Lisp
+        GHC.Parser.Lisp.Parens
+        GHC.Parser.Lisp.Printer
+        GHC.Parser.Lisp.Reader
+        GHC.Driver.Lisp
         GHC.Platform
         GHC.Platform.ARM
         GHC.Platform.AArch64

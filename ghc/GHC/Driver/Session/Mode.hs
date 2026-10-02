@@ -89,6 +89,7 @@ data PostLoadMode
   | DoAbiHash               -- ghc --abi-hash
   | ShowPackages            -- ghc --show-packages
   | DoFrontend ModuleName   -- ghc --frontend Plugin.Module
+  | DoLisp String           -- ghc-lisp: ghc --hs2lisp, --lisp2hs, --lisp-check
 
 doMkDependHSMode, doMakeMode, doInteractiveMode, doRunMode,
   doAbiHashMode, showUnitsMode :: Mode
@@ -260,7 +261,8 @@ mode_flags =
   , defFlag "-abi-hash"    (PassFlag (setMode doAbiHashMode))
   , defFlag "e"            (SepArg   (\s -> setMode (doEvalMode s) "-e"))
   , defFlag "-frontend"    (SepArg   (\s -> setMode (doFrontendMode s) "-frontend"))
-  ]
+  ] ++ [ defFlag ('-':m) (PassFlag (setMode (mkPostLoadMode (DoLisp m)))) | m <- ["hs2lisp", "lisp2hs", "lisp-check"] ] -- ghc-lisp:
+
 
 addUnit :: String -> String -> EwM ModeM ()
 addUnit unit_str _arg = liftEwM $ do

@@ -79,6 +79,7 @@ import GHC.Tc.Utils.Monad      ( initIfaceCheck )
 import GHC.Iface.Errors.Ppr
 
 import GHC.Driver.Session.Mode
+import GHC.Driver.Lisp ( lispMode ) -- ghc-lisp:
 import GHC.Driver.Session.Lint
 import GHC.Driver.Session.Units
 
@@ -279,6 +280,7 @@ main' postLoadMode units dflags0 args flagWarnings = do
        DoAbiHash              -> abiHash (map fst srcs)
        ShowPackages           -> liftIO $ showUnits hsc_env
        DoFrontend f           -> doFrontend f srcs
+       DoLisp m               -> lispMode m (map fst srcs) -- ghc-lisp:
        DoBackpack             -> doBackpack (map fst srcs)
 
   liftIO $ dumpFinalStats logger
