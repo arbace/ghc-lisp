@@ -10,7 +10,8 @@ go-lisp (github.com/arbace/go-lisp), which did the same for Go.
 
 ## Git rules (hard)
 
-- Commit and push **only** on the `ghc-lisp` branch.
+- Commit and push **only** on the `ghc-lisp` branch. It is the default branch
+  of `origin` (github.com/arbace/ghc-lisp).
 - **Never** commit to, push to, or merge into `master`. `master` mirrors
   upstream GHC.
 - Commit messages follow GHC style: a short summary line, a blank line,
