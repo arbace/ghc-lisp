@@ -1,6 +1,6 @@
 # ghc-lisp: design notes (living document)
 
-Status: **draft v3**. The syntax is not settled. Every open decision has an
+Status: **draft v4**. The syntax is not settled. Every open decision has an
 ID (D1, D2, ...) so we can talk about it and update it. Settled decisions
 move to the "Decided" log at the bottom. Sister project: go-lisp
 (github.com/arbace/go-lisp), whose decisions are the starting point here.
@@ -108,72 +108,13 @@ Foo.hs ──┴─ GHC.Parser.parseModule ───────┴──> HsMod
 
 ## 5. Open decisions
 
-**D1. Heads.** Decided (2026-10-02): EDN keywords. See the log.
-
-**D2. Lexemes.** EDN structure (lists, vectors, `#_`; `{}`, `#{}`, `#tag`
-reserved) plus Haskell's own literal grammar: strings with Haskell escapes
-(`\&`, `\SOH`, `\^A`, string gaps), char literals `'a'`, numbers with
-`NumericUnderscores`, hex floats, binary literals, `MagicHash` suffixes
-(`3#`, `3##`, `"x"#`). Identifiers may contain `'` (`foldl'`, `x'`), which
-the reader has to tell apart from char literals and from promotion /
-TH name quotes (`'Just`, `''T`). Multiline strings (`"""`) maybe later.
-
-**D3. Names.** Decided (2026-10-02): verbatim. See the log.
-
-**D4. Operators and fixity.** Decided (2026-10-02): chains plus `:infix`;
-sections are `:section-l` / `:section-r`. See the log.
-
-**D5. Vectors.** Decided (2026-10-02): Haskell brackets; record fields
-are `(:: fields... Type)` groups. See the log.
-
-**D6. Tuples.** Decided (2026-10-02): `(:tuple ...)` and `()`. See the log.
-
-**D7. Bindings.** Decided (2026-10-02): `(= lhs rhs)` forms. See the log.
-
-**D8. Layout.** S-expressions replace layout: `do`, `let`, `where`, `case`,
-`class`, `instance`, `\case` bodies are the form's remaining elements.
-No braces, no semicolons.
-
-**D9. Vocabulary.** Decided (2026-10-02): Haskell words. See the log.
-
-**D10. Pragmas.** Decided (2026-10-02): forms before `module`. See the
-log.
-
-**D11. CPP.** Options:
-  - (a) no CPP in `.hsl` for now. Converting a CPP'd `.hs` file captures one
-    configuration; the corpus test works on the post-CPP AST either way.
-  - (b) run CPP on `.hsl` files as on `.hs`. EDN's `;` comments and `'`
-    chars may confuse the C preprocessor, even in traditional mode.
-
-**D12. Comments and Haddock.** Haddock comments are part of the AST (with
-`-haddock`). Plain comments are only in EPA. Milestone 1: drop plain
-comments, maybe keep doc comments as `;;|` / `;;^`. Revisit with
-`hs2lisp`.
-
-**D13. Positions and exact-print annotations.** `GhcPs` carries EPA
-(`EpAnn`, `EpToken`, ...) for `ghc-exactprint`. The Lisp parser fills real
-`SrcSpan`s from forms, and leaves annotations empty unless a later pass
-reads them. The round-trip test ignores annotations (as check-ppr does).
-
-**D14. Scope.** The end goal is all of GHC's surface syntax, including
-GADTs, type families, Template Haskell, quasiquotes, arrows, linear types,
-`RequiredTypeArguments`, unboxed sums. Proposed order: Haskell 2010
-plus the extensions that `libraries/` uses, then everything that
-`testsuite/tests` parses.
-
-**D15. Dots.** Qualified names (`M.insert`, `Data.Map.Map`, `M.!`) and
-`OverloadedRecordDot` (`r.field`, `r.a.b`) share the dot. Haskell itself
-separates them by case: an uppercase segment before the dot is a module.
-Proposal: dotted symbols follow the same rule; `(:get e field)` selects
-from a non-name expression.
-
-**D16. Template Haskell and quasiquotes.** Splices `(:splice e)` / `$x`?,
-quotes `(:quote e)`, typed variants, name quotes `'f` / `''T`, and
-quasiquotes `(:qq name "raw text")`, whose body stays text.
+None of the syntax-level decisions (D1-D16) are open; see the log below.
+Detailed shapes (every `GhcPs` constructor, its disambiguation rule and its
+round-trip comparison) go into `ghclisp/SPEC.md`, written next.
 
 ## 6. Roadmap
 
-0. Settle D1..D16 with worked examples. Write `ghclisp/SPEC.md` with one
+0. Settle D1..D16 with worked examples (done). Write `ghclisp/SPEC.md` with one
    form per AST constructor.
 1. Reader with positions, plus tests.
 2. Printer (AST -> Lisp) first: it forces a complete mapping for every
@@ -255,3 +196,54 @@ quasiquotes `(:qq name "raw text")`, whose body stays text.
   contexts. No Clojure aliases (`fn`, `defn`, ...). Examples:
   `(\ x y (+ x y))`, `(case m (-> Nothing 0) (-> (Just x) x))`,
   `(let (= n 1) (* n 2))`, `(import qualified Data.Map as M)`.
+- **D2 (2026-10-02): EDN structure, Haskell lexemes.** Lists, vectors and
+  `#_` as in EDN; `{}`, `#{}` and `#tag` are read but reserved. Literals
+  follow Haskell's lexical grammar exactly: strings with Haskell escapes
+  (`\&`, `\SOH`, `\^A`) and gaps, char literals `'a'`, numbers with
+  `NumericUnderscores`, hex floats, binary literals, and `MagicHash`
+  suffixes (`3#`, `3##`, `"x"#`). The literal's source text is kept
+  verbatim, as GHC keeps it. `'` follows GHC's lexer: inside a name it is a
+  prime (`foldl'`, `x''`), `'a'` is a char literal, and `'Just` / `''T`
+  are promotion ticks and TH name quotes. A leading sign (`-5`) reads as
+  `(- 5)`, a negation, as in Haskell (`NegativeLiterals` details: SPEC).
+  The comma is whitespace. Multiline strings (`"""`) may come later.
+- **D8 (2026-10-02): no layout.** A block's statements, bindings or
+  alternatives are the form's remaining elements, with no wrapper:
+  `(do (<- x get) (print x))`, `(let (= a 1) (= b 2) (+ a b))` (the last
+  element is the body), `(case m (-> Nothing 0) (-> (Just x) x))`,
+  `(class (Show a) (:: show (-> a String)))`.
+- **D11 (2026-10-02): no CPP in `.hsl` files for now.** Enabling `CPP` in
+  a `.hsl` file is an error. Converting a CPP'd `.hs` file captures one
+  configuration; the corpus test works on the post-CPP AST. Conditional
+  compilation may get its own form later.
+- **D12 (2026-10-02): Haddock comments mirror Haddock.** `;;|` documents
+  what follows (`-- |`), `;;^` what precedes (`-- ^`), and `;;*` starts a
+  section heading (`-- *`). With `-haddock` they go into the AST as
+  Haddock comments do. Plain `;` comments are ignored by the parser.
+  `hs2lisp` keeps comments where it can, but the round trip doesn't
+  compare them.
+- **D13 (2026-10-02): spans only.** Every node gets a real `SrcSpan` from
+  its form, so diagnostics, HIE files and the debugger point into the
+  `.hsl` file. Exact-print annotations stay empty (`noAnn`), except where a
+  later pass turns out to read them. `lisp2hs` prints with GHC's `ppr`, not
+  exact print. `ghc-exactprint` doesn't support `.hsl` ASTs. The round trip
+  compares with `BlankSrcSpan` / `BlankEpAnnotations`, as check-ppr does.
+- **D14 (2026-10-02): milestone 1 is all of GHC's syntax, printer first.**
+  As in go-lisp, the printer maps every `GhcPs` constructor, and the corpus
+  defines done: the Haskell sources in `libraries/`, `compiler/`, `utils/`
+  and the `testsuite/tests` files that parse. Every round-trip failure is a
+  bug. Template Haskell, arrows, linear types and the rest are in scope,
+  ordered by how often the corpus uses them. Progress is measured as files
+  passing out of files total.
+- **D15 (2026-10-02): dots mean qualification only.** A dotted symbol is a
+  qualified name: uppercase module segments, then the name (`M.insert`,
+  `Data.Map.Map`, `M.!`, `Prelude..`). `.` alone is composition:
+  `(. show length)`. `OverloadedRecordDot` is always a form:
+  `(:get r name)` is `r.name`, `(:get (f x) a b)` is `(f x).a.b`, and
+  `(:proj name)` is the projection section `(.name)`.
+- **D16 (2026-10-02): Template Haskell uses keyword forms.** `(:splice e)`
+  is `$e`/`$(e)`, `(:typed-splice e)` is `$$e`. Quotes: `(:quote e)`
+  (`[| e |]`), `(:quote-type T)`, `(:quote-pat p)`, `(:quote-decls d...)`,
+  `(:typed-quote e)` (`[|| e ||]`). Name quotes `'f` and `''T` are
+  lexemes (D2). A quasiquote is `(:qq quoter "text")`; its body stays text,
+  in Haskell string syntax. No `$x` shorthand: `$` is an ordinary operator.
