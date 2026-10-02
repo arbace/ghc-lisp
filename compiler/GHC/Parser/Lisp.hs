@@ -21,6 +21,8 @@ import GHC.Prelude hiding (head)
 import GHC.Hs hiding (patNeedsParens)
 import GHC.Parser.Lexer
 import GHC.Parser.PostProcess
+import GHC.Parser (parseIdentifier)
+import GHC.Parser.HaddockLex (lexStringLiteral)
 import GHC.Parser.Errors.Types
 import GHC.Parser.Lisp.Reader
 import GHC.Parser.Lisp.Parens
@@ -210,6 +212,12 @@ headOf (Form _ n) = case n of
           | otherwise -> HTok t
   _ -> HOther
 
+-- | @(:name x)@, @(:tuple-con n)@, @(:utuple-con n)@.
+isNameForm :: Form -> Bool
+isNameForm (Form _ (FList [h, _])) = isKw "name" h || isKw "tuple-con" h || isKw "utuple-con" h || isKw "usum-con" h
+isNameForm (Form _ (FList [h, _, _])) = isKw "usum-con" h
+isNameForm _ = False
+
 isKw :: String -> Form -> Bool
 isKw k (Form _ (FKeyword k')) = k' == fsLit k
 isKw _ _ = False
@@ -266,7 +274,7 @@ data NS = NSExpr | NSType
 
 rdrFor :: NS -> Sym -> RdrName
 rdrFor ns (Sym mm s k)
-  | Nothing <- mm, s == fsLit ":" , NSExpr <- ns = consDataCon_RDR
+  | Nothing <- mm, s == fsLit ":" = consDataCon_RDR
   | otherwise = maybe (mkUnqual space s) (\m -> mkQual space (m, s)) mm
   where
     space = case (ns, k) of
@@ -283,6 +291,10 @@ nameAt ns f = case f of
   Form _ (FList [h, x]) | isKw "name" h -> nameAt' x
   Form _ (FList [h, n]) | isKw "tuple-con" h -> tupleCon Boxed n
   Form _ (FList [h, n]) | isKw "utuple-con" h -> tupleCon Unboxed n
+  Form _ (FList [h, n]) | isKw "usum-con" h, Form _ (FAtom (ITinteger il)) <- n ->
+    pure (at f (getRdrName (sumTyCon (fromIntegral (il_value il)))))
+  Form _ (FList [h, Form _ (FAtom (ITinteger alt)), Form _ (FAtom (ITinteger ar))]) | isKw "usum-con" h ->
+    pure (at f (getRdrName (sumDataCon (fromIntegral (il_value alt)) (fromIntegral (il_value ar)))))
   Form _ (FList []) -> pure (at f (byNS (getRdrName unitDataCon) (getRdrName unitTyCon)))
   Form _ (FVector []) -> pure (at f (byNS (getRdrName nilDataCon) (getRdrName listTyCon)))
   _ -> failAt f "expected a name"
@@ -435,6 +447,7 @@ ieP isExport f = case f of
     | Just ns <- namespaceOf h, [Form _ (FList (n : subs))] <- args, all isDotDot subs, not (null subs) -> do
         nm <- wrapped (Form (formPsSpan f) (FList [h, n]))
         pure (at f (IEThingAll (IEThingAllExt Nothing noAnn noAnn noAnn) ns nm Nothing))
+  Form _ (FList [h, x]) | isWrapHead h, isJust (symOf x) -> plainItem
   Form _ (FList (n : subs)) | not (isNamespaceHead n) -> do
     nm <- wrapped n
     case subs of
@@ -445,14 +458,18 @@ ieP isExport f = case f of
         items <- mapM wrapped (before ++ drop 1 after)
         let wc = if null after then NoIEWildcard else IEWildcard (length before)
         pure (at f (IEThingWith (Nothing, noAnn) nm wc items Nothing))
-  _ -> do
-    nm@(L _ w) <- wrapped f
-    let isVar = case w of
-          IEName _ (L _ r) -> isVarOcc (rdrNameOcc r)
-          _ -> False
-    pure (at f (if isVar then IEVar Nothing nm Nothing else IEThingAbs Nothing nm Nothing))
+  _ -> plainItem
   where
     _ = isExport
+    plainItem = do
+      nm@(L _ w) <- wrapped f
+      let isVar = case w of
+            IEName _ (L _ r) -> isVarOcc (rdrNameOcc r)
+            IEPattern{} -> True
+            IEDefault{} -> True
+            _ -> False
+      pure (at f (if isVar then IEVar Nothing nm Nothing else IEThingAbs Nothing nm Nothing))
+    isWrapHead h = isName "pattern" h || isTok (\case ITpattern -> True; ITtype -> True; ITdata -> True; ITdefault -> True; _ -> False) h
     isNamespaceHead h = isJust (namespaceOf h) || isTok (\case ITmodule -> True; _ -> False) h
                         || isKw "deprecated" h || isKw "warning" h
     namespaceOf :: Form -> Maybe (NamespaceSpecifier GhcPs)
@@ -498,15 +515,14 @@ warningTxtP f = case listOf f of
   where
     category c = case c of
       Form _ (FAtom (ITstring st _ s)) ->
-        pure (at c (InWarningCategory noAnn (at c (WarningCategory s))))
-        <* pure st
+        pure (at c (InWarningCategory (noAnn, st) (at c (WarningCategory s))))
       _ -> failAt c "expected a warning category string"
     msgs m = case m of
       Form _ (FVector ms) -> mapM msg ms
       _ -> (: []) <$> msg m
     msg m = case m of
       Form _ (FAtom (ITstring st _ s)) ->
-        pure (at m (WithHsDocIdentifiers (StringLiteral st s) []))
+        pure (reLoc (lexStringLiteral parseIdentifier (L (formSpan m) (StringLiteral st s))))
       _ -> failAt m "expected a string"
 
 -------------------------------------------------------------------------------
@@ -576,7 +592,7 @@ keywordDecl ctx f k args = case k of
   "inlineable" -> inlineSig Inlinable
   "opaque" -> case args of
     [n] -> do
-      nm <- varName' n
+      nm <- nameAt NSExpr n
       pure [sigD (InlineSig noAnn nm (mkOpaquePragma NoSourceText))]
     _ -> failAt f "expected (:opaque name)"
   "specialise" -> specSig
@@ -625,7 +641,7 @@ keywordDecl ctx f k args = case k of
             r -> (False, r)
       case rest' of
         [n] -> do
-          nm <- varName' n
+          nm <- nameAt NSExpr n
           a <- act
           pure [sigD (InlineSig noAnn nm (mkInlinePragma NoSourceText (spec, if conlike then ConLike else FunLike) a))]
         _ -> failAt f "expected (:inline [phase]? :conlike? name)"
@@ -710,7 +726,7 @@ annDecl f = \case
 
 ruleDecl :: Form -> P (LRuleDecl GhcPs)
 ruleDecl f = case listOf f of
-  Just (nameF@(Form _ (FAtom (ITstring _ _ name))) : rest0) -> do
+  Just (nameF@(Form _ (FAtom (ITstring nameSrc _ name))) : rest0) -> do
     let (act, rest1) = activationP rest0
         (bndrForms, rest2) = span (isJust . tokForm (\case ITforall _ -> True; _ -> False)) rest1
     a <- act
@@ -719,7 +735,7 @@ ruleDecl f = case listOf f of
       [eq] | Just [l, r] <- tokForm (\case ITequal -> True; _ -> False) eq -> do
         lhs <- expr ETop l
         rhs <- expr ETop r
-        pure (at f (HsRule (noAnn, NoSourceText) (at nameF name) (fromMaybe AlwaysActive a) bndrs lhs rhs))
+        pure (at f (HsRule (noAnn, nameSrc) (at nameF name) (fromMaybe AlwaysActive a) bndrs lhs rhs))
       _ -> failAt f "expected (= lhs rhs) in a rule"
   _ -> failAt f "expected (\"name\" ... (= lhs rhs))"
 
@@ -756,10 +772,9 @@ binding _ f lhs rhsForms = do
   case lhsShape lhs of
     LhsFun name fixity strict pats -> do
       nm <- varName' name
-      ps <- zipWithM (\pos p -> pat pos p) (map (const PArg) pats) pats
       ps' <- case fixity of
-        Infix -> mapM (pat POperand) (take 2 pats) >>= \ops -> (ops ++) <$> mapM (pat PArg) (drop 2 pats)
-        Prefix -> pure ps
+        Infix -> mapM lhsOperand (take 2 pats) >>= \ops -> (ops ++) <$> mapM (pat PArg) (drop 2 pats)
+        Prefix -> mapM (pat PArg) pats
       let ctxt = FunRhs { mc_fun = nm, mc_fixity = fixity
                         , mc_strictness = if strict then SrcStrict else NoSrcStrict
                         , mc_an = noAnn }
@@ -769,22 +784,35 @@ binding _ f lhs rhsForms = do
       p <- pat PTop lhs
       pure (PatBind noExtField p [] grhss)
 
+-- | An operand of an infix function lhs: an unparenthesized constructor
+-- chain (@f :+ g <*> a :+ b@) or an ordinary operand.
+lhsOperand :: Form -> P (LPat GhcPs)
+lhsOperand x = case kwForm "lhs-chain" x of
+  Just items | length items >= 3 -> patInfixChain x items
+  Just [p] -> pat POperand p
+  _ -> pat POperand x
+
 data LhsShape
   = LhsFun Form LexicalFixity Bool [Form]   -- ^ name, fixity, strict, patterns
   | LhsPat
 
 lhsShape :: Form -> LhsShape
 lhsShape lhs = case lhs of
-  _ | Just s <- symOf lhs, symKind s == VarId -> LhsFun lhs Prefix False []
+  _ | Just s <- symOf lhs, symKind s `elem` [VarId, VarSym] -> LhsFun lhs Prefix False []
   Form _ (FList [b, x])
     | isBangTok b, Just s <- symOf x, symKind s == VarId -> LhsFun x Prefix True []
   Form _ (FList (h : args))
     | Just s <- symOf h, symKind s == VarId, not (null args) -> LhsFun h Prefix False args
-    | Just [_] <- kwForm "name" h, not (null args) -> LhsFun h Prefix False args
+    | Just [x] <- kwForm "name" h, Just s <- symOf x, symKind s `elem` [VarId, VarSym], not (null args)
+        -> LhsFun h Prefix False args
     | Just s <- symOf h, symKind s == VarSym, [_, _] <- args, not (isBangTok h && length args == 1)
         -> LhsFun h Infix False args
     | isKw "infix" h, [l, op, r] <- args, Just s <- symOf op, symKind s `elem` [VarId, VarSym]
         -> LhsFun op Infix False [l, r]
+    | isKw "infix" h, odd (length args)
+    , [(i, op)] <- [ (i, o) | (i, o) <- zip [0 :: Int ..] args, odd i, Just s <- [symOf o], symKind s `elem` [VarId, VarSym] ]
+        -> let side xs = Form (formPsSpan lhs) (FList (Form (formPsSpan lhs) (FKeyword (fsLit "lhs-chain")) : xs))
+           in LhsFun op Infix False [side (take i args), side (drop (i + 1) args)]
     | Form _ (FList (ih : iargs)) <- h, not (null args) -> case lhsShape (Form (formPsSpan h) (FList (ih : iargs))) of
         LhsFun n Infix st ps -> LhsFun n Infix st (ps ++ args)
         _ -> LhsPat
@@ -824,7 +852,7 @@ guardedRhs bodyP g = case tokForm (\case ITvbar -> True; _ -> False) g of
   _ -> failAt g "expected (| guard... rhs)"
 
 localBindsP :: [Form] -> P (HsLocalBinds GhcPs)
-localBindsP [] = pure (EmptyLocalBinds noExtField)
+localBindsP [] = pure (HsValBinds noAnn (ValBinds noExtField []))
 localBindsP forms
   | all isIPBind forms = do
       bs <- forM forms $ \b -> case tokForm (\case ITequal -> True; _ -> False) b of
@@ -846,7 +874,7 @@ sigDecl :: DeclCtx -> Form -> [Form] -> P (LHsDecl GhcPs)
 sigDecl ctx f args = do
   (names, t) <- sigParts f args
   case ctx of
-    ClassCtx -> pure (at f (SigD noExtField (ClassOpSig noAnn False names (hsTypeToHsSigType t))))
+    _ | ctx `elem` [ClassCtx, InstCtx] -> pure (at f (SigD noExtField (ClassOpSig noAnn False names (hsTypeToHsSigType t))))
     _ -> pure (at f (SigD noExtField (TypeSig noAnn [] names (hsTypeToHsSigWcType t))))
 
 sigParts :: Form -> [Form] -> P ([LocatedN RdrName], LHsType GhcPs)
@@ -859,15 +887,15 @@ sigParts f args = case args of
 
 fixityDecl :: FixityDirection -> Form -> [Form] -> P (LHsDecl GhcPs)
 fixityDecl dir f args = do
-  let (prec, r0) = case args of
-        (Form _ (FAtom (ITinteger il)) : r) -> (fromIntegral (il_value il), r)
-        r -> (9, r)
+  let (prec, src, r0) = case args of
+        (Form _ (FAtom (ITinteger il)) : r) -> (fromIntegral (il_value il), il_text il, r)
+        r -> (9, NoSourceText, r)
       (ns, r1) = case r0 of
         (h : r) | isTok (\case ITtype -> True; _ -> False) h -> (TypeNamespaceSpecifier noAnn, r)
                 | isTok (\case ITdata -> True; _ -> False) h -> (DataNamespaceSpecifier noAnn, r)
         r -> (NoNamespaceSpecifier noExtField, r)
   names <- mapM (nameAt NSExpr) r1
-  pure (at f (SigD noExtField (FixSig noAnn (FixitySig noExtField ns names (Fixity prec dir)))))
+  pure (at f (SigD noExtField (FixSig (noAnn, src) (FixitySig noExtField ns names (Fixity prec dir)))))
 
 patSynDecl :: Form -> [Form] -> P (LHsDecl GhcPs)
 patSynDecl f = \case
@@ -935,6 +963,10 @@ headWithKind f = case tokForm (\case ITdcolon _ -> True; _ -> False) f of
   _ -> (, Nothing) <$> typ TTop f
 
 dataDecl :: DeclCtx -> Form -> NewOrData -> Bool -> [Form] -> P (LHsDecl GhcPs)
+dataDecl ctx f nd isTypeData (fam : rest)
+  | isName "family" fam || isTok (\case ITfamily -> True; _ -> False) fam =
+      familyDecl ctx f DataFamily rest
+dataDecl ClassCtx f DataType False args = familyDecl ClassCtx f DataFamily args
 dataDecl ctx f nd isTypeData args0 = do
   let (ctype, args1) = case args0 of
         (c : r) | isJust (kwForm "ctype" c) -> (Just c, r)
@@ -964,11 +996,11 @@ dataDecl ctx f nd isTypeData args0 = do
           pure (L l (TyClD noExtField d))
   where
     isDeriving x = isJust (tokForm (\case ITderiving -> True; _ -> False) x)
-    ctypeExt = CTypeGhc NoSourceText NoSourceText noAnn
+    ctypeExt ns = CTypeGhc NoSourceText ns noAnn
     ctypeP c = case kwForm "ctype" c of
-      Just [Form _ (FAtom (ITstring _ _ h)), Form _ (FAtom (ITstring _ _ n))] ->
-        pure (at c (CType ctypeExt (Just (Header NoSourceText h)) n))
-      Just [Form _ (FAtom (ITstring _ _ n))] -> pure (at c (CType ctypeExt Nothing n))
+      Just [Form _ (FAtom (ITstring hs _ h)), Form _ (FAtom (ITstring ns _ n))] ->
+        pure (at c (CType (ctypeExt ns) (Just (Header hs h)) n))
+      Just [Form _ (FAtom (ITstring ns _ n))] -> pure (at c (CType (ctypeExt ns) Nothing n))
       _ -> failAt c "malformed :ctype"
 
 -- | An explicit forall on a family-instance head: @(forall tv... head)@.
@@ -1003,6 +1035,12 @@ gadtType f = typ TTop f
 
 h98Con :: Form -> P (LConDecl GhcPs)
 h98Con f = case f of
+  _ | isNameForm f -> do
+    n <- nameAt NSExpr f
+    pure (at f (mkConDeclH98 noAnn [] n Nothing Nothing (PrefixCon noExtField [])))
+  Form _ (FList [h, c]) | isKw "rec" h -> do
+    n <- nameAt NSExpr c
+    pure (at f (mkConDeclH98 noAnn [] n Nothing Nothing (RecCon noAnn (at f []))))
   Form _ (FList (h : args))
     | isTok (\case ITforall _ -> True; _ -> False) h, not (null args) -> do
         tvs <- mapM (tyVarBndrP specP) (init args)
@@ -1106,11 +1144,20 @@ typeDecl ctx f args = case args of
     n <- nameAt NSType t
     L l d <- mkRoleAnnotDecl (formSpan f) n [ L (formSpan x) (roleOf x) | x <- roles ] noAnn
     pure [L l (RoleAnnotD noExtField d)]
+  [e] | ctx `elem` [ClassCtx, InstCtx], Just [_, _] <- tokForm (\case ITequal -> True; _ -> False) e -> do
+    eq <- famEqnP e
+    L l d <- mkTyFamInst (formSpan f) (unLoc eq) noAnn noAnn
+    pure [L l (InstD noExtField d)]
+  [e] | ctx `elem` [ClassCtx, InstCtx], Just (h : _) <- listOf e, isTok (\case ITforall _ -> True; _ -> False) h -> do
+    eq <- famEqnP e
+    L l d <- mkTyFamInst (formSpan f) (unLoc eq) noAnn noAnn
+    pure [L l (InstD noExtField d)]
+  [hd] | ctx == ClassCtx -> (: []) <$> familyDecl ctx f OpenTypeFamily [hd]
+  (hd : r : rest) | ctx == ClassCtx, isFamilyResult r -> (: []) <$> familyDecl ctx f OpenTypeFamily (hd : r : rest)
   [s] | Just [n, k] <- tokForm (\case ITdcolon _ -> True; _ -> False) s -> do
     nm <- nameAt NSType n
     kd <- sigTypeP k
     pure [at f (KindSigD noExtField (StandaloneKindSig noAnn nm kd))]
-  [hd] | ctx == ClassCtx -> (: []) <$> familyDecl ctx f OpenTypeFamily [hd]
   [hd, rhs]
     | ctx == ClassCtx -> do
         -- associated type default: type F a = rhs
@@ -1129,6 +1176,10 @@ typeDecl ctx f args = case args of
   _ -> failAt f "malformed type declaration"
   where
     roleOf x = if isUnderscore x then Nothing else plainName x
+    isFamilyResult r = case tokForm (\case ITequal -> True; ITvbar -> True; _ -> False) r of
+      Just [_] -> True
+      Just (_ : _ : _) | isJust (tokForm (\case ITvbar -> True; _ -> False) r) -> True
+      _ -> False
 
 familyDecl :: DeclCtx -> Form -> FamilyInfo GhcPs -> [Form] -> P (LHsDecl GhcPs)
 familyDecl ctx f info0 args = case args of
@@ -1207,7 +1258,7 @@ instanceDecl f args0 = do
     (t : body) -> do
       ty <- sigTypeP t
       ds <- concat <$> mapM (topDecl InstCtx) body
-      let binds = ds
+      binds <- cvBindsAndSigs (toOL ds)
       pure (at f (InstD noExtField (ClsInstD noExtField
         (ClsInstDecl (warn, noAnn) [] ty binds (fmap (at f) ov)))))
     [] -> failAt f "an instance needs a head"
@@ -1307,19 +1358,26 @@ typeForm :: Form -> P (LHsType GhcPs)
 typeForm f = case formNode f of
   FAtom t -> typeAtom f t
   FVector [] -> at f <$> mkListSyntaxTy0 noAnn noAnn (formSpan f)
-  FVector [x] -> at f . HsListTy noAnn <$> typ TTop x
+  FVector [x] -> do
+    t <- typ TTop x
+    at f <$> mkListSyntaxTy1 noAnn t noAnn
   FVector xs -> at f . HsExplicitListTy noAnn NotPromoted <$> mapM (typ TTop) xs
   FList [] -> at f <$> mkTupleSyntaxTy noAnn [] noAnn
   FPrefix PTick x -> case formNode x of
     FVector xs -> at f . HsExplicitListTy noAnn IsPromoted <$> mapM (typ TTop) xs
     FList (h : xs) | isKw "tuple" h -> at f . HsExplicitTupleTy noAnn IsPromoted <$> mapM (typ TTop) xs
-    _ | isJust (symOf x) -> do
+    _ | isJust (symOf x) || isNameForm x -> do
           n <- nameAt NSExpr x
           pure (at f (HsTyVar noAnn IsPromoted n))
     _ -> failAt f "unexpected promoted form"
   FPrefix _ _ -> failAt f "unexpected prefix in a type"
   FKeyword _ -> failAt f "unexpected keyword in a type"
+  FList [h] | isKw "tuple" h -> at f <$> mkTupleSyntaxTy noAnn [] noAnn
+            | isKw "utuple" h -> pure (at f (HsTupleTy noAnn HsUnboxedTuple []))
   FList [_] -> failAt f "a one-element list is not a type; write the type itself"
+  FList _ | isNameForm f -> do
+    n <- nameAt NSType f
+    pure (at f (HsTyVar noAnn NotPromoted n))
   FList (h : args) -> case h of
     _ | isTok (\case ITforall _ -> True; _ -> False) h -> forallType f args
       | isTok (\case ITdarrow _ -> True; _ -> False) h -> do
@@ -1338,6 +1396,13 @@ typeForm f = case formNode f of
       | isKw "utuple" h -> at f . HsTupleTy noAnn HsUnboxedTuple <$> mapM (typ TParen) args
       | isKw "usum" h -> at f . HsSumTy noAnn <$> mapM (typ TParen) args
       | isKw "paren" h, [x] <- args -> at f . HsParTy noAnn <$> typ TParen x
+      | isKw "record" h -> do
+          flds <- mapM recFieldP args
+          pure (at f (XHsType (HsRecTy noAnn (L (formSpan f) flds))))
+      | isBangHead h, [x] <- args -> at f . mkBangTy noAnn SrcStrict <$> typ TArg x
+      | isLazyHead h, [x] <- args -> at f . mkBangTy noAnn SrcLazy <$> typ TArg x
+      | isKw "unpack" h, [x] <- args -> typ TArg x >>= addUnpackednessP (L (formSpan f) (UnpackednessPragma noAnn (SourceText (fsLit "{-# UNPACK")) SrcUnpack))
+      | isKw "nounpack" h, [x] <- args -> typ TArg x >>= addUnpackednessP (L (formSpan f) (UnpackednessPragma noAnn (SourceText (fsLit "{-# NOUNPACK")) SrcNoUnpack))
       | isKw "infix" h -> typeInfixChain f args
       | isKw "splice" h || isKw "qq" h -> at f . HsSpliceTy noExtField <$> spliceForm f h args
       | isKw "tuple-con" h || isKw "utuple-con" h -> typeApp f h args
@@ -1345,6 +1410,8 @@ typeForm f = case formNode f of
       | FPrefix PTick op <- formNode h, Just s <- symOf op, isSymbolic s, length args >= 2 -> typeOpChain f (Just h) args
       | otherwise -> typeApp f h args
   where
+    isBangHead = isTok (\case ITbang -> True; ITvarsym s -> s == fsLit "!"; _ -> False)
+    isLazyHead = isTok (\case ITtilde -> True; ITvarsym s -> s == fsLit "~"; _ -> False)
     isLinearArrowSym = isTok (\case ITvarsym s -> s == fsLit "->."; _ -> False)
 
 typeAtom :: Form -> Token -> P (LHsType GhcPs)
@@ -1377,7 +1444,9 @@ forallType f args = do
     _ -> failAt f "malformed forall"
 
 specP :: Form -> P Specificity
-specP _ = pure SpecifiedSpec
+specP x
+  | isJust (kwForm "inferred" x) = pure InferredSpec
+  | otherwise = pure SpecifiedSpec
 
 -- | A type variable binder: @a@, @(:: a K)@, @(:inferred a)@, @\@a@, @_@.
 tyVarBndrP :: forall flag. (Form -> P flag) -> Form -> P (LHsTyVarBndr flag GhcPs)
@@ -1386,7 +1455,8 @@ tyVarBndrP flagP f = go f
     go x = case x of
       Form _ (FList [h, inner]) | isKw "inferred" h -> do
         L l b <- go inner
-        pure (L l (setSpec b))
+        fl <- flagP x
+        pure (L l b { tvb_flag = fl })
       Form _ (FList [h, v, k]) | isDcolon h -> do
         var <- bndrVar v
         kd <- typ TTop k
@@ -1399,8 +1469,6 @@ tyVarBndrP flagP f = go f
     bndrVar v
       | isUnderscore v = pure (HsBndrWildCard (HoleVar (at v unnamedHoleRdrName)))
       | otherwise = HsBndrVar noExtField <$> nameAt NSType v
-    setSpec :: HsTyVarBndr flag GhcPs -> HsTyVarBndr flag GhcPs
-    setSpec b = b
 
 arrowChain :: Form -> HsFunArr GhcPs -> [Form] -> P (LHsType GhcPs)
 arrowChain f arr args
@@ -1490,6 +1558,10 @@ exprForm f = case formNode f of
   FPrefix PTyQuote x -> at f . HsUntypedBracket noExtField . VarBr noAnn False <$> nameAt NSType x
   FPrefix PAt _ -> failAt f "a type argument must follow a function"
   FKeyword _ -> failAt f "unexpected keyword in an expression"
+  FList [h] | isTok (\case ITlcase -> True; _ -> False) h -> lamCase f LamCase []
+            | isTok (\case ITlcases -> True; _ -> False) h -> lamCase f LamCases []
+            | isKw "tuple" h -> pure (at f (ExplicitTuple noAnn [] Boxed))
+            | isKw "utuple" h -> pure (at f (ExplicitTuple noAnn [] Unboxed))
   FList [_] -> failAt f "a one-element list is not an expression; write (:paren e) for parentheses"
   FList (h : args) -> case headOf h of
     HTok ITlam -> lambda f args
@@ -1593,7 +1665,7 @@ vectorExpr f xs = case xs of
   (body : bar : quals) | isBar bar -> do
     mc <- getBit MonadComprehensionsBit
     b <- e body
-    groups <- mapM (mapM stmtP) (splitOn isBar quals)
+    groups <- mapM qualsP (splitOn isBar quals)
     stmts <- case groups of
       [g] -> pure g
       gs -> pure [at f (ParStmt noExtField (NE.fromList [ ParStmtBlock noExtField g [] noSyntaxExpr | g <- gs ]) noExpr noSyntaxExpr)]
@@ -1603,7 +1675,21 @@ vectorExpr f xs = case xs of
   where
     e = expr ETop
     seqE info = at f . ArithSeq noAnn Nothing <$> info
-    noExpr = HsLit noExtField (HsString NoSourceText (packHText ""))
+    noExpr = HsLit noExtField (HsString (SourceText (fsLit "noExpr")) (packHText "noExpr"))
+
+-- | Comprehension qualifiers; a @then@ qualifier takes all the qualifiers
+-- before it, as in GHC's grammar.
+qualsP :: [Form] -> P [ExprLStmt GhcPs]
+qualsP = go []
+  where
+    go acc [] = pure (reverse acc)
+    go acc (q : qs)
+      | Just args <- tokForm (\case ITthen -> True; _ -> False) q = do
+          t <- transStmt q args (reverse acc)
+          go [t] qs
+      | otherwise = do
+          s <- stmtP q
+          go (s : acc) qs
 
 splitOn :: (a -> Bool) -> [a] -> [[a]]
 splitOn p xs = case break p xs of
@@ -1658,7 +1744,7 @@ stmtP f = case f of
         p' <- pat PTop p
         e' <- expr ETop e
         pure (at f (BindStmt noAnn p' e'))
-    | isTok (\case ITlet -> True; _ -> False) h, all isBindingForm args, not (null args) -> do
+    | isTok (\case ITlet -> True; _ -> False) h, all isBindingForm args -> do
         binds <- localBindsP args
         pure (at f (LetStmt noAnn binds))
     | isTok (\case ITrec -> True; _ -> False) h -> do
@@ -1666,7 +1752,7 @@ stmtP f = case f of
         pure (at f (RecStmt { recS_ext = noAnn, recS_stmts = at f ss, recS_later_ids = []
                             , recS_rec_ids = [], recS_bind_fn = noSyntaxExpr
                             , recS_ret_fn = noSyntaxExpr, recS_mfix_fn = noSyntaxExpr }))
-    | isTok (\case ITthen -> True; _ -> False) h -> transStmt f args
+    | isTok (\case ITthen -> True; _ -> False) h -> transStmt f args []
   _ -> do
     e <- expr ETop f
     pure (at f (BodyStmt noExtField e noSyntaxExpr noSyntaxExpr))
@@ -1677,8 +1763,8 @@ stmtP f = case f of
                                 || (case b of Form _ (FKeyword _) -> True; _ -> False)
       _ -> False
 
-transStmt :: Form -> [Form] -> P (ExprLStmt GhcPs)
-transStmt f args = case args of
+transStmt :: Form -> [Form] -> [ExprLStmt GhcPs] -> P (ExprLStmt GhcPs)
+transStmt f args prev = case args of
   (g : rest) | isName "group" g || isTok (\case ITgroup -> True; _ -> False) g -> do
     let (byF, rest') = case rest of
           (b : e : r) | isName "by" b || isTok (\case ITby -> True; _ -> False) b -> (Just e, r)
@@ -1699,9 +1785,9 @@ transStmt f args = case args of
   [] -> failAt f "malformed then"
   where
     mkTrans form using by = TransStmt
-      { trS_ext = noAnn, trS_form = form, trS_stmts = [], trS_bndrs = []
+      { trS_ext = noAnn, trS_form = form, trS_stmts = prev, trS_bndrs = []
       , trS_using = using, trS_by = by, trS_ret = noSyntaxExpr
-      , trS_bind = noSyntaxExpr, trS_fmap = HsLit noExtField (HsString NoSourceText (packHText "")) }
+      , trS_bind = noSyntaxExpr, trS_fmap = HsLit noExtField (HsString (SourceText (fsLit "noExpr")) (packHText "noExpr")) }
 
 keywordExpr :: Form -> String -> [Form] -> P (LHsExpr GhcPs)
 keywordExpr f k args = case k of
@@ -1719,14 +1805,14 @@ keywordExpr f k args = case k of
   "section-l" | [e, op] <- args -> do
     e' <- expr ESectionL e
     o <- opExpr op
-    pure (at f (HsPar noAnn (at f (SectionL noExtField e' o))))
+    pure (at f (SectionL noExtField e' o))
   "section-r" | [op, e] <- args -> do
     o <- opExpr op
     e' <- expr ESectionR e
-    pure (at f (HsPar noAnn (at f (SectionR noExtField o e'))))
+    pure (at f (SectionR noExtField o e'))
   "rec" | (c : flds) <- args -> do
     con <- nameAt NSExpr c
-    fs <- recFieldsP (expr ETop) flds
+    fs <- recFieldsP' (expr ETop) punPlaceholder flds
     pure (at f (RecordCon noExtField con fs))
   "update" | (e : flds) <- args -> do
     e' <- expr EAtom e
@@ -1755,13 +1841,14 @@ keywordExpr f k args = case k of
   "scc" | [lbl, e] <- args -> do
     sl <- case lbl of
       Form _ (FAtom (ITstring st _ s)) -> pure (StringLiteral st s)
-      _ | Just s <- plainName lbl -> pure (StringLiteral (SourceText s) (packHText (unpackFS s)))
+      _ | Just s <- plainName lbl -> pure (StringLiteral NoSourceText (packHText (unpackFS s)))
       _ -> failAt lbl "expected a label"
     e' <- expr ETop e
     pure (at f (HsPragE noExtField (HsPragSCC (noAnn, NoSourceText) sl) e'))
   "qual-lit" | [m, s] <- args -> at f . HsQualLit noExtField <$> qualLitP m s
-  "name" -> appSpine f (Form (formPsSpan f) (FList (Form (formPsSpan f) (FKeyword (fsLit k)) : args))) []
+  "name" -> nameExpr
   "tuple-con" -> nameExpr
+  "usum-con" -> nameExpr
   "utuple-con" -> nameExpr
   _ -> failAt f ("unknown expression form :" ++ k)
   where
@@ -1854,7 +1941,14 @@ appSpine _ h args = do
         hd (zip [1 :: Int ..] args)
 
 recFieldsP :: (Form -> P (LocatedA arg)) -> [Form] -> P (HsRecFields GhcPs (LocatedA arg))
-recFieldsP argP flds = do
+recFieldsP argP flds = recFieldsP' argP id flds
+
+-- | The right-hand side GHC's parser gives a punned field in an expression.
+punPlaceholder :: Form -> Form
+punPlaceholder x = Form (formPsSpan x) (FAtom (ITvarid (fsLit "pun-right-hand-side")))
+
+recFieldsP' :: (Form -> P (LocatedA arg)) -> (Form -> Form) -> [Form] -> P (HsRecFields GhcPs (LocatedA arg))
+recFieldsP' argP punRhs flds = do
   let (fs, dd) = case reverse flds of
         (d : r) | isDotDot d -> (reverse r, Just d)
         _ -> (flds, Nothing)
@@ -1865,7 +1959,7 @@ recFieldsP argP flds = do
       pure (at x (HsFieldBind noAnn (at l (FieldOcc noExtField n)) v False))
     _ -> do
       n <- nameAt NSExpr x
-      v <- argP x
+      v <- argP (punRhs x)
       pure (at x (HsFieldBind noAnn (at x (FieldOcc noExtField n)) v True))
   pure (HsRecFields noAnn binds (fmap (\d -> at d (RecFieldsDotDot (length binds))) dd))
 
@@ -1878,7 +1972,7 @@ recUpdP flds = do
       pure (at x (HsFieldBind noAnn (at l (FieldOcc noExtField n)) v False))
     _ -> do
       n <- nameAt NSExpr x
-      v <- expr ETop x
+      v <- expr ETop (punPlaceholder x)
       pure (at x (HsFieldBind noAnn (at x (FieldOcc noExtField n)) v True))
   pure (RegularRecUpdFields noExtField binds)
 
@@ -1897,11 +1991,15 @@ pat pos f = do
 patForm :: Form -> P (LPat GhcPs)
 patForm f = case formNode f of
   FAtom t -> patAtom f t
-  FVector xs -> at f . ListPat noAnn <$> mapM (pat PTop) xs
+  FVector [] -> conPat f [] f
+  FVector xs -> at f . ListPat noAnn <$> mapM (pat PElem) xs
   FList [] -> conPat f [] f
   FPrefix PAt t -> at f . InvisPat (noAnn, SpecifiedSpec) . HsTP noExtField <$> typ TArg t
   FPrefix _ _ -> failAt f "unexpected prefix in a pattern"
   FKeyword _ -> failAt f "unexpected keyword in a pattern"
+  FList _ | isNameForm f -> conPat f [] f
+  FList [h] | isKw "tuple" h -> pure (at f (TuplePat noAnn [] Boxed))
+            | isKw "utuple" h -> pure (at f (TuplePat noAnn [] Unboxed))
   FList [_] -> failAt f "a one-element list is not a pattern"
   FList (h : args) -> case h of
     _ | isTildeTok h, [p] <- args -> at f . LazyPat noAnn <$> pat PPrefixed p
@@ -1910,19 +2008,19 @@ patForm f = case formNode f of
           nm <- varName' n
           at f . AsPat noAnn nm <$> pat PPrefixed p
       | isKw "paren" h, [p] <- args -> at f . ParPat noAnn <$> pat PParen p
-      | isKw "tuple" h -> at f . (\ps -> TuplePat noAnn ps Boxed) <$> mapM (pat PTop) args
-      | isKw "utuple" h -> at f . (\ps -> TuplePat noAnn ps Unboxed) <$> mapM (pat PTop) args
+      | isKw "tuple" h -> at f . (\ps -> TuplePat noAnn ps Boxed) <$> mapM (pat PElem) args
+      | isKw "utuple" h -> at f . (\ps -> TuplePat noAnn ps Unboxed) <$> mapM (pat PElem) args
       | isKw "or" h, not (null args) -> at f . OrPat noExtField . NE.fromList <$> mapM (pat PTop) args
       | isKw "usum" h -> do
           let width = length args
           case [ (i, x) | (i, x) <- zip [1 ..] args, not (isHole x) ] of
             [(tag, x)] -> do
-              p <- pat PTop x
+              p <- pat PElem x
               pure (at f (SumPat noAnn p tag width))
             _ -> failAt f "(:usum ...) needs exactly one non-:_ element"
       | isKw "rec" h, (c : flds) <- args -> do
           con <- nameAt NSExpr c
-          fs <- recFieldsP (pat PTop) flds
+          fs <- recFieldsP' (pat PElem) punPlaceholder flds
           pure (at f (ConPat noExtField con (RecCon noAnn fs)))
       | isRArrow h, [e, p] <- args -> do
           e' <- expr ETop e
@@ -1966,7 +2064,7 @@ patAtom f t = case t of
   ITunderscore -> pure (at f (WildPat noExtField))
   _ | Just ol <- overLitOf t -> pure (at f (NPat noAnn (at f ol) Nothing noSyntaxExpr))
     | Just l <- tokLit t -> pure (at f (LitPat noExtField l))
-    | Just s <- tokSym t, symKind s == VarId, Nothing <- symMod s -> at f . VarPat noExtField <$> nameAt NSExpr f
+    | Just s <- tokSym t, symKind s `elem` [VarId, VarSym], Nothing <- symMod s -> at f . VarPat noExtField <$> nameAt NSExpr f
     | otherwise -> conPat f [] f
 
 conPat :: Form -> [Form] -> Form -> P (LPat GhcPs)

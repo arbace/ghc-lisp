@@ -33,7 +33,7 @@ import GHC.Utils.Outputable
 
 import Data.List.NonEmpty (NonEmpty(..), toList)
 import qualified Data.List.NonEmpty as NE
-import Data.Char (isAlpha, isUpper)
+import Data.Char (isAlpha, isUpper, isDigit)
 import Data.Maybe (isJust)
 
 data PrintOpts = PrintOpts { prParens :: ParenOpts }
@@ -98,20 +98,44 @@ exact occ = case occNameString occ of
   ":" -> text ":"
   "->" -> parens (text ":name ->")
   "FUN" -> parens (text ":name ->")
-  s | Just (kind, n) <- tupleArity s -> parens (text kind <+> int n)
+  "Unit#" -> tupleCon ":utuple-con" 0
+  "Solo#" -> tupleCon ":utuple-con" 1
+  "MkSolo#" -> tupleCon ":utuple-con" 1
+  "Solo" -> tupleCon ":tuple-con" 1
+  "MkSolo" -> tupleCon ":tuple-con" 1
+  '(':'#':r | all (`elem` "_| ") (takeWhile (/= '#') r), '|' `elem` r ->
+    -- an unboxed sum data constructor: (:usum-con alt arity)
+    let slots = splitBars (filter (/= ' ') (takeWhile (/= '#') r))
+        alt = length (takeWhile (/= "_") slots) + 1
+    in parens (text ":usum-con" <+> int alt <+> int (length slots))
+  s | Just n <- sumTc s -> tupleCon ":usum-con" n
+  s | Just n <- tupleTc s -> tupleCon ":tuple-con" n
+    | Just n <- utupleTc s -> tupleCon ":utuple-con" n
+    | '(':'#':r <- s, all (== ',') (takeWhile (/= '#') r) ->
+        tupleCon ":utuple-con" (let c = length (takeWhile (== ',') r) in if c == 0 then 0 else c + 1)
+    | '(':r <- s, all (== ',') (takeWhile (/= ')') r), not (null r) ->
+        tupleCon ":tuple-con" (length (takeWhile (== ',') r) + 1)
     | otherwise -> ftext (occNameFS occ)
   where
-    tupleArity s = case s of
-      '(':'#':r | all (== ',') (takeWhile (/= '#') r) ->
-        Just (":utuple-con", length (takeWhile (== ',') r) + 1)
-      '(':r | all (== ',') (takeWhile (/= ')') r), not (null r) ->
-        Just (":tuple-con", length (takeWhile (== ',') r) + 1)
+    tupleCon k n = parens (text k <+> int n)
+    splitBars str = case break (== '|') str of
+      (a, []) -> [a]
+      (a, _ : rest) -> a : splitBars rest
+    sumTc s = case splitAt 3 s of
+      ("Sum", ds) | not (null ds), last ds == '#', all isDigit (init ds), not (null (init ds)) -> Just (read (init ds))
+      _ -> Nothing
+    tupleTc s = case splitAt 5 s of
+      ("Tuple", ds) | not (null ds), all isDigit ds -> Just (read ds)
+      _ -> Nothing
+    utupleTc s = case splitAt 5 s of
+      ("Tuple", ds) | not (null ds), last ds == '#', all isDigit (init ds), not (null (init ds)) -> Just (read (init ds))
       _ -> Nothing
 
 lname :: GenLocated l RdrName -> SDoc
 lname = rdr . unLoc
 
 isSymName :: RdrName -> Bool
+isSymName (Exact _) = False
 isSymName r = case occNameString (rdrNameOcc r) of
   c:_ -> not (isAlpha c || c == '_' || c == '(' || c == '[')
   _ -> False
@@ -255,8 +279,8 @@ warningArgs :: WarningTxt GhcPs -> [SDoc]
 warningArgs = \case
   DeprecatedTxt _ msgs -> [msgsDoc msgs]
   WarningTxt _ mcat msgs ->
-    maybe [] (\(L _ (InWarningCategory _ (L _ (WarningCategory c)))) ->
-                [text "in", doubleQuotes (htext c)]) mcat ++
+    maybe [] (\(L _ (InWarningCategory (_, st) (L _ (WarningCategory c)))) ->
+                [text "in", srcOr st (doubleQuotes (htext c))]) mcat ++
     [msgsDoc msgs]
   where
     msgsDoc [L _ m] = stringLit (hsDocString m)
@@ -296,8 +320,9 @@ decl o ctx = \case
 
 warnDecl :: WarnDecl GhcPs -> SDoc
 warnDecl (Warning _ ns names w) =
-  form (warningHead w) (namespace ++ map lname names ++ warningArgs w)
+  form (warningHead w) (init args ++ namespace ++ map lname names ++ [last args])
   where
+    args = warningArgs w
     namespace = case ns of
       NoNamespaceSpecifier _ -> []
       TypeNamespaceSpecifier _ -> [text "type"]
@@ -321,7 +346,7 @@ ruleBndrs o (RuleBndrs _ mtvs tms) =
 activation :: ActivationGhc -> [SDoc]
 activation = \case
   AlwaysActive -> []
-  ActiveBefore n -> [brackets (char '~' <> int n)]
+  ActiveBefore n -> [brackets (char '~' <+> int n)]
   ActiveAfter n -> [brackets (int n)]
   NeverActive -> [brackets (char '~')]
   _ -> []
@@ -427,9 +452,9 @@ dataDefn o kw hd (HsDataDefn _ mctx mctype mkind cons derivs) =
       Just k -> form (text "::") [hd, typ o TTop k]
     ctypeDoc = case mctype of
       Nothing -> empty
-      Just (L _ (CType _ mh name)) ->
-        form (text ":ctype") (maybe [] (\(Header _ h) -> [doubleQuotes (htext h)]) mh ++
-                              [doubleQuotes (htext name)])
+      Just (L _ (CType ext mh name)) ->
+        form (text ":ctype") (maybe [] (\(Header hs h) -> [srcOr hs (doubleQuotes (htext h))]) mh ++
+                              [srcOr (cTypeOtherText ext) (doubleQuotes (htext name))])
     conList = case cons of
       NewTypeCon c -> [c]
       DataTypeCons _ cs -> cs
@@ -459,6 +484,7 @@ conDecl o = \case
             PrefixCon _ [] -> lname n
             PrefixCon _ fs -> form (headName (unLoc n)) (map (conField o TArg) fs)
             InfixCon _ l r -> form (text ":infix") [conField o TOperand l, lname n, conField o TOperand r]
+            RecCon _ (L _ []) -> form (text ":rec") [lname n]
             RecCon _ (L _ flds) -> form (headName (unLoc n)) (map (recField o . unLoc) flds)
           withC = withCtx o mctx core
       in if hasForall
@@ -505,8 +531,11 @@ arrowArg o (HsModifiedFunArr _ mods _) a = case mods of
   _ -> form (text ":mod") (map (modifier o) mods ++ [a])
 
 conField :: PrintOpts -> TPos -> HsConDeclField GhcPs -> SDoc
-conField o pos (CDF _ unpack bang _ t _) = unpackDoc (bangDoc (typ o pos' t))
+conField o pos (CDF _ unpack bang _ t _) = unpackDoc (bangDoc tyDoc)
   where
+    tyDoc = case t of
+      L _ (HsParTy _ k@(L _ HsKindSig{})) | pos == TArg -> form (text ":paren") [typ o TParen k]
+      _ -> typ o pos' t
     pos' = if bang /= NoSrcStrict || unpack /= NoSrcUnpack then TArg else pos
     bangDoc d = case bang of
       SrcStrict -> form (text "!") [d]
@@ -627,6 +656,10 @@ funEquation o n (Match _ ctxt (L _ pats) grhss) =
       SrcStrict -> form (text "!") [d]
       _ -> d
     lhs = strictWrap $ case (fixity, pats) of
+      (Infix, l : r : rest)
+        | isConChain l || isConChain r ->
+            let inf = form (text ":infix") (chainItems l ++ [lname n] ++ chainItems r)
+            in if null rest then inf else form inf (map (pat o PArg) rest)
       (Infix, l : r : rest) ->
         let inf = infixLhs (pat o POperand l) (pat o POperand r)
         in if null rest then inf else form inf (map (pat o PArg) rest)
@@ -635,6 +668,13 @@ funEquation o n (Match _ ctxt (L _ pats) grhss) =
     infixLhs l r
       | isSymName (unLoc n) = form (lname n) [l, r]
       | otherwise = form (text ":infix") [l, lname n, r]
+    chainItems p@(L _ (ConPat _ _ InfixCon{})) = conChainItems o p
+    chainItems p = [pat o POperand p]
+
+-- | An unparenthesized infix constructor pattern, as in @f :+ g <*> a :+ b@.
+isConChain :: LPat GhcPs -> Bool
+isConChain (L _ (ConPat _ _ InfixCon{})) = True
+isConChain _ = False
 
 grhssDocs :: PrintOpts -> GRHSs GhcPs (LHsExpr GhcPs) -> [SDoc]
 grhssDocs o (GRHSs _ grhss binds) = rhs ++ whereDoc o binds
@@ -647,9 +687,9 @@ grhs :: PrintOpts -> (body -> SDoc) -> GRHS GhcPs body -> SDoc
 grhs o bodyDoc (GRHS _ guards body) = form (text "|") (map (stmt o . unLoc) guards ++ [bodyDoc body])
 
 whereDoc :: PrintOpts -> HsLocalBinds GhcPs -> [SDoc]
-whereDoc o binds = case localBinds o binds of
-  [] -> []
-  ds -> [formV (text "where") ds]
+whereDoc o binds = case binds of
+  EmptyLocalBinds _ -> []
+  _ -> [formV (text "where") (localBinds o binds)]
 
 localBinds :: PrintOpts -> HsLocalBinds GhcPs -> [SDoc]
 localBinds o = \case
@@ -685,9 +725,11 @@ sig o ctx = \case
   ClassOpSig _ isDefault names t ->
     let s = form (text "::") (map lname names ++ [sigType o t])
     in if isDefault then form (text "default") [s] else s
-  FixSig _ (FixitySig _ ns names (Fixity prec dir)) ->
-    form (fixityKw dir) ([int prec] ++ namespace ns ++ map lname names)
-  InlineSig _ n prag -> form (inlineHead prag) (inlineOpts prag ++ [lname n])
+  FixSig (_, src) (FixitySig _ ns names (Fixity prec dir)) ->
+    form (fixityKw dir) ([ srcOr src (int prec) | isSourceText src ] ++ namespace ns ++ map lname names)
+  InlineSig _ n prag
+    | Opaque <- inl_inline prag -> form (text ":opaque") [lname n]
+    | otherwise -> form (inlineHead prag) (inlineOpts prag ++ [lname n])
   SpecSig _ n tys prag ->
     form (text ":specialise") (specOpts prag ++ [lname n] ++ map (sigType o) tys)
   SpecSigE _ bndrs e prag ->
@@ -700,6 +742,9 @@ sig o ctx = \case
     form (text ":complete") (map lname names ++ maybe [] (\t -> [text "::", lname t]) mty)
   where
     _ = ctx
+    isSourceText = \case
+      SourceText _ -> True
+      NoSourceText -> False
     fixityKw = \case
       InfixL -> text "infixl"
       InfixR -> text "infixr"
@@ -775,12 +820,19 @@ typeForm o = \case
   HsKindSig _ t k -> form (text "::") [typ o TSigSubj t, typ o TTop k]
   HsSpliceTy _ sp -> untypedSplice o sp
   HsDocTy _ t _ -> typ o TTop t
-  HsExplicitListTy _ prom ts -> promoted prom (vec (map (typ o TTop) ts))
+  HsExplicitListTy _ prom ts -> case (prom, ts) of
+    (IsPromoted, L _ t1 : _) | startsWithTick t1 -> text "'[" <+> fsep (map (typ o TTop) ts) <> char ']'
+    _ -> promoted prom (vec (map (typ o TTop) ts))
   HsExplicitTupleTy _ prom ts -> promoted prom (form (text ":tuple") (map (typ o TTop) ts))
   HsTyLit _ l -> hsLit l
   HsWildCardTy _ -> text "_"
   XHsType _ -> todo "XHsType"
   where
+    startsWithTick = \case
+      HsTyVar _ IsPromoted _ -> True
+      HsExplicitListTy _ IsPromoted _ -> True
+      HsExplicitTupleTy _ IsPromoted _ -> True
+      _ -> False
     promoted IsPromoted d = char '\'' <> d
     promoted NotPromoted d = d
 
@@ -896,7 +948,7 @@ exprForm o = \case
   HsUntypedSplice _ sp -> untypedSplice o sp
   HsProc _ p (L _ (HsCmdTop _ (L _ c))) -> form (text "proc") [pat o PArg p, cmd o c]
   HsStatic _ e -> form (text "static") [expr o EAtom e]
-  HsPragE _ (HsPragSCC _ sl) e -> form (text ":scc") [stringLit sl, expr o ETop e]
+  HsPragE _ (HsPragSCC _ sl) e -> form (text ":scc") [sccLabel sl, expr o ETop e]
   HsEmbTy _ (HsWC _ t) -> form (text "type") [typ o TTop t]
   HsStar _ -> text "*"
   HsHole k -> case k of
@@ -929,6 +981,12 @@ exprForm o = \case
     arrowHead' (HsModifiedFunArr _ _ a) = case a of
       HsStandardArr _ -> text "->"
       HsLinearArr _ -> text "->."
+
+-- | An SCC label: an identifier label has no source text.
+sccLabel :: StringLiteral GhcPs -> SDoc
+sccLabel sl = case sl_src sl of
+  NoSourceText -> htext (sl_fs sl)
+  _ -> stringLit sl
 
 recFields :: PrintOpts -> (LocatedA arg -> SDoc) -> HsRecFields GhcPs (LocatedA arg) -> [SDoc]
 recFields _ argDoc (HsRecFields _ flds dotdot) =
@@ -1021,6 +1079,7 @@ doExpr o flav stmts = case flav of
         vec (expr o ETop body : text "|" : concatMap qualDocs (reverse rquals))
       _ -> todo "comprehension"
     qualDocs (L _ s) = case s of
+      TransStmt { trS_stmts = prev } -> concatMap qualDocs prev ++ [stmt o s]
       ParStmt _ blocks _ _ ->
         intersperseBar [ map (stmt o . unLoc) ss | ParStmtBlock _ ss _ _ <- toList blocks ]
       _ -> [stmt o s]
@@ -1059,15 +1118,15 @@ patForm o = \case
   AsPat _ n p -> form (text ":as") [lname n, pat o PPrefixed p]
   ParPat _ p -> form (text ":paren") [pat o PParen p]
   BangPat _ p -> form (text "!") [pat o PPrefixed p]
-  ListPat _ ps -> vec (map (pat o PTop) ps)
-  TuplePat _ ps boxity -> form (text (if isBoxed boxity then ":tuple" else ":utuple")) (map (pat o PTop) ps)
+  ListPat _ ps -> vec (map (pat o PElem) ps)
+  TuplePat _ ps boxity -> form (text (if isBoxed boxity then ":tuple" else ":utuple")) (map (pat o PElem) ps)
   OrPat _ ps -> form (text ":or") (map (pat o PTop) (toList ps))
   SumPat _ p tag width ->
-    form (text ":usum") (replicate (tag - 1) (text ":_") ++ [pat o PTop p] ++ replicate (width - tag) (text ":_"))
+    form (text ":usum") (replicate (tag - 1) (text ":_") ++ [pat o PElem p] ++ replicate (width - tag) (text ":_"))
   p@(ConPat _ (L _ con) args) -> case args of
     PrefixCon _ [] -> rdr con
     PrefixCon _ ps -> form (headName con) (map (pat o PArg) ps)
-    RecCon _ flds -> form (text ":rec") (rdr con : recFields o (pat o PTop) flds)
+    RecCon _ flds -> form (text ":rec") (rdr con : recFields o (pat o PElem) flds)
     InfixCon{} -> conChain o p
   ViewPat _ e p -> form (text "->") [expr o ETop e, pat o PTop p]
   SplicePat _ sp -> untypedSplice o sp
@@ -1081,6 +1140,17 @@ patForm o = \case
   EmbTyPat _ (HsTP _ t) -> form (text "type") [typ o TTop t]
   InvisPat _ (HsTP _ t) -> char '@' <> typ o TArg t
   ModifiedPat _ mods p -> form (text ":mod") (map (modifier o) mods ++ [pat o PTop p])
+
+-- | The operands and constructors of a constructor chain, interleaved.
+conChainItems :: PrintOpts -> LPat GhcPs -> [SDoc]
+conChainItems o (L _ p0) = interleave (map (pat o POperand) operands) (map rdr cons)
+  where
+    (operands, cons) = flatten p0
+    flatten = \case
+      ConPat _ (L _ c) (InfixCon _ (L _ l@(ConPat _ _ InfixCon{})) r) ->
+        let (os, cs) = flatten l in (os ++ [r], cs ++ [c])
+      ConPat _ (L _ c) (InfixCon _ l r) -> ([l, r], [c])
+      _ -> ([], [])
 
 conChain :: PrintOpts -> Pat GhcPs -> SDoc
 conChain o p0

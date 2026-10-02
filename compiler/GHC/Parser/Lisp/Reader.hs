@@ -165,6 +165,11 @@ lineText st = case peek st of
                    (r, st'') = lineText st'
                in (c : r, st'')
 
+-- | Characters of Haskell operator symbols (so @\@?=@ is an operator, not a
+-- type application).
+isSymbolChar :: Char -> Bool
+isSymbolChar c = c `elem` ("!#$%&*+./<=>?@\\^|-~:" :: String)
+
 isDelim :: Char -> Bool
 isDelim c = isSpace c || c `elem` (",()[]{};\"`" :: String)
 
@@ -190,7 +195,7 @@ readForm opts st@(l0, _) = case peek st of
     let (_, st1) = step st
         (name, st2) = spanSt (not . isDelim) st1
     pure (Just (Form (mkPsSpan l0 (fst st2)) (FKeyword (fsLit name))), st2)
-  Just '@' | Just c2 <- peek2 st, not (isDelim c2) || c2 `elem` ("([" :: String) ->
+  Just '@' | Just c2 <- peek2 st, (not (isDelim c2) && not (isSymbolChar c2)) || c2 `elem` ("([" :: String) ->
     prefix PAt 1
   Just '\'' | peek2 st == Just '\'' -> prefix PTyQuote 2
   _ -> atom
@@ -280,9 +285,29 @@ isNumeric = \case
   ITprimword64{} -> True
   _ -> False
 
--- | Lex exactly one Haskell token starting at the current position.
+-- | Lex exactly one Haskell token starting at the current position. Strings,
+-- chars and labels may contain delimiters, so they are lexed in the whole
+-- buffer; any other atom is lexed on its own text, up to the next delimiter,
+-- so that no Haskell token can run past it (@||]@ in @[a ||]@ is not a
+-- Template Haskell close quote).
 lexOne :: ParserOpts -> St -> Either ReadErr (Token, St)
-lexOne opts (l@(PsLoc rl _), buf) =
+lexOne opts st@(l, buf)
+  | Just c <- peek st, c `elem` ("\"'" :: String) = lexOneIn opts st
+  | Just '#' <- peek st, peek2 st == Just '"' = lexOneIn opts st
+  | otherwise =
+      let end = skipToDelim' st
+          n = byteDiff buf (snd end)
+          sub = stringToStringBuffer (lexemeToString buf n)
+      in case lexOneIn opts (l, sub) of
+           Left e -> Left e
+           Right (tok, (l', sub')) -> Right (tok, (l', offsetBytes (byteDiff sub sub') buf))
+  where
+    skipToDelim' s = case peek s of
+      Just c | not (isDelim c) -> skipToDelim' (snd (step s))
+      _ -> s
+
+lexOneIn :: ParserOpts -> St -> Either ReadErr (Token, St)
+lexOneIn opts (l@(PsLoc rl _), buf) =
   let pst0 = (initParserState opts buf rl) { loc = l }
   in case unP (lexer False return) pst0 of
        PFailed pst -> Left (mkPsSpan l (loc pst), "lexical error")

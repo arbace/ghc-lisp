@@ -52,16 +52,20 @@ data EPos
 
 exprNeedsParens :: ParenOpts -> EPos -> HsExpr GhcPs -> Bool
 exprNeedsParens opts pos e
-  | isBlock e = not (openOk pos)
+  | isBlock e = not (openOk pos || multiIfArg)
   | otherwise = exprLevel opts e < required pos
   where
+    -- GHC accepts a multi-way if as an argument even without BlockArguments.
+    multiIfArg = case e of
+      HsMultiIf{} -> pos `elem` [EArg, EArgLast]
+      _ -> False
     required = \case
       ETop -> 0
       EParen -> -1
       ESigSubj -> 1
       EOpFirst -> 2
-      EOpMid -> 3
-      EOpLast -> if poLexicalNegation opts then 2 else 3
+      EOpMid -> 2
+      EOpLast -> 2
       EFun -> 3
       EArg -> 4
       EArgLast -> 4
@@ -69,11 +73,17 @@ exprNeedsParens opts pos e
       ESectionL -> 1
       ESectionR -> 1
       EAtom -> 4
+    -- Layout can close a block, so Haskell never needs parentheses around
+    -- one in an operator chain; under BlockArguments, nor in arguments.
     openOk = \case
       ETop -> True
       EParen -> True
+      EOpFirst -> True
+      EOpMid -> True
       EOpLast -> True
+      ESectionL -> True
       ESectionR -> True
+      EArg -> poBlockArguments opts
       EArgLast -> poBlockArguments opts
       _ -> False
 
@@ -171,6 +181,7 @@ data PPos
   | POperand    -- ^ operand of an infix constructor chain
   | PPrefixed   -- ^ inside @~p@, @!p@, @x\@p@
   | PSigSubj    -- ^ @p@ in @p :: T@
+  | PElem       -- ^ tuple, list, sum and record-field elements
   deriving (Eq, Show)
 
 patNeedsParens :: ParenOpts -> PPos -> Pat GhcPs -> Bool
@@ -183,6 +194,7 @@ patNeedsParens opts pos p = patLevel opts p < required
       POperand -> 3
       PPrefixed -> 4
       PSigSubj -> 1
+      PElem -> -1
 
 patLevel :: ParenOpts -> Pat GhcPs -> Int
 patLevel opts = \case
@@ -236,7 +248,7 @@ typeNeedsParens pos t = typeLevel t < required
       TOperand -> 3
       TFun -> 3
       TArg -> 4
-      TCtxElem -> 2
+      TCtxElem -> -1
       TSigSubj -> 1
 
 typeLevel :: HsType GhcPs -> Int
