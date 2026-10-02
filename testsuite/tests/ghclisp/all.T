@@ -33,3 +33,7 @@ test('lisp009', [extra_files(['lisp009.hsl'])], ghci_script, ['lisp009.script'])
 # highlighted. Prints nothing if all is well or if vim isn't installed.
 test('lisp010', [extra_files(['lisp006.hs', 'lisp001.hsl'])], run_command,
      ['QUIET=1 sh {top}/../ghclisp/vim/test.sh {compiler} lisp006.hs'])
+
+# Haddock comments (;;| and ;;^) reach -haddock: GHCi's :doc shows them.
+test('lisp011', [extra_files(['lisp011.hsl']), extra_hc_opts('-haddock')],
+     ghci_script, ['lisp011.script'])

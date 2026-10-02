@@ -1,0 +1,15 @@
+;;| Shapes, documented with Haddock comments (;;|, ;;^).
+(module Lisp011 [(Shape ..) area])
+
+;;| A shape.
+(data Shape
+   (Circle Double)
+   ;;^ a circle, by its radius
+   (Square Double)
+   ;;^ a square, by its side
+   (deriving Show))
+
+;;| The area of a shape.
+(:: area (-> Shape Double))
+(= (area (Circle r)) (* pi r r))
+(= (area (Square s)) (* s s))

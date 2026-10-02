@@ -1,0 +1,4 @@
+:load lisp011.hsl
+:doc area
+:doc Shape
+:doc Circle

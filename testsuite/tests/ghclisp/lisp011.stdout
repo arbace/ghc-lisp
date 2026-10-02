@@ -1,0 +1,7 @@
+area :: Shape -> Double 	-- Identifier defined at lisp011.hsl:14:5
+-- | The area of a shape.
+Shape :: * 	-- Type constructor defined at lisp011.hsl:5:1
+-- | A shape.
+Circle :: Double -> Shape
+  	-- Data constructor defined at lisp011.hsl:6:4
+-- ^ a circle, by its radius
