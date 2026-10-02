@@ -134,7 +134,7 @@ round-trip comparison) go into `ghclisp/SPEC.md`, written next.
 | 3. Parser (ghc-lisp -> AST) | done: `GHC/Parser/Lisp.hs`, reusing `GHC.Parser.PostProcess`. The round trip (`ghc --lisp-check`) is exact for all 4,863 parseable Haskell files in `compiler/`, `libraries/`, `utils/`, `ghc/` and `hadrian/`, and for 11,382 of the 11,423 parseable files in `testsuite/tests` (99.6%). Files that GHC itself can't parse in isolation (CPP headers from build directories, default extensions from .cabal files, expected-failure tests) are skipped. |
 | 4. Compiler hooks | done: `ghc Foo.hsl`, `ghc --make` with mixed `.hs`/`.hsl` modules, GHCi `:load`, `runghc`, `-fhpc`. Diagnostics point into the `.hsl` source. Behavioral test: `ghclisp/run-corpus.sh` converts the testsuite's single-module should_run programs to `.hsl`; 1,069 behave identically to the Haskell originals (12 excluded: they print their own source locations or depend on timing). |
 | 5. Build tools | `ghc --make` and GHCi build mixed `.hs`/`.hsl` programs. cabal: `ghclisp/cabal` holds a one-line-per-check patch to Cabal (a submodule) and a script that builds cabal-install with it; `cabal build`, `run` and `sdist` then work on packages with `.hsl` modules. |
-| 6. Tooling | `ghc --hs2lisp` (keeps comments; Haddock comments become `;;|`, `;;^`, ...), `ghc --lisp2hs` (GHC's pretty-printer), `ghc --lisp-check`; `;;|` comments reach `-haddock` through GHC's own Haddock pass (with `-haddock`, 4,099 of 4,863 source files round-trip including their docs). Vim and Neovim: `ghclisp/vim`. Tests in `testsuite/tests/ghclisp`. |
+| 6. Tooling | `ghc --hs2lisp` (keeps comments; Haddock comments become `;;|`, `;;^`, ...), `ghc --lisp2hs` (GHC's pretty-printer), `ghc --lisp-check`; `;;|` comments reach `-haddock` through GHC's own Haddock pass (with `-haddock`, 4,185 of 4,863 source files round-trip including their docs). Vim and Neovim: `ghclisp/vim`. Tests in `testsuite/tests/ghclisp`. |
 
 Upstream hooks, all marked (`git grep 'ghc-lisp:'`): the module list in
 `compiler/ghc.cabal.in`; `GHC.Driver.Phases` (the `.hsl` suffix),
@@ -146,7 +146,7 @@ dispatch in `ghc/` (`--hs2lisp`, `--lisp2hs`, `--lisp-check`).
 
 - `hs2lisp` puts a comment that was inside a line of code in front of the
   next printed line; with `-haddock`, some doc comments attach differently
-  than in the Haskell original (16% of source files differ in their docs).
+  than in the Haskell original (14% of source files differ in their docs, mostly comments after the last item of a list).
 - Diagnostics print expressions in Haskell syntax (names are the same, D3).
 - cabal needs the patch in `ghclisp/cabal`.
 

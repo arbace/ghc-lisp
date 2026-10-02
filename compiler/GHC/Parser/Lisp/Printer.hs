@@ -511,7 +511,7 @@ dataKeyword defn = case dd_cons defn of
 
 withCtx :: PrintOpts -> Maybe (LHsContext GhcPs) -> SDoc -> SDoc
 withCtx _ Nothing d = d
-withCtx o (Just (L _ (HsContext _ cs))) d = form (text "=>") (map (typ o TCtxElem) cs ++ [d])
+withCtx o (Just (L _ (HsContext _ cs))) d = form (text "=>" <+> hsep (map (typ o TCtxElem) cs)) [d]
 
 dataDefn :: PrintOpts -> SDoc -> SDoc -> HsDataDefn GhcPs -> SDoc
 dataDefn o kw hd (HsDataDefn _ mctx mctype mkind cons derivs) =
@@ -807,10 +807,10 @@ patSynBind o (PSB _ n details def dir) = form (text "pattern") $
 sig :: PrintOpts -> DeclCtx -> Sig GhcPs -> SDoc
 sig o ctx = \case
   TypeSig _ mods names (HsWC _ t) ->
-    modified o mods $ form (text "::") (map lname names ++ [sigType o t])
+    modified o mods $ form (text "::" <+> hsep (map lname names)) [sigType o t]
   PatSynSig _ names t -> form (text "pattern") [form (text "::") (map lname names ++ [sigType o t])]
   ClassOpSig _ isDefault names t ->
-    let s = form (text "::") (map lname names ++ [sigType o t])
+    let s = form (text "::" <+> hsep (map lname names)) [sigType o t]
     in if isDefault then form (text "default") [s] else s
   FixSig (_, src) (FixitySig _ ns names (Fixity prec dir)) ->
     form (fixityKw dir) ([ srcOr src (int prec) | isSourceText src ] ++ namespace ns ++ map lname names)
@@ -870,12 +870,12 @@ sigTypeBody o t = sigType o (L noSrcSpanA t)
 sigTypeAt :: PrintOpts -> TPos -> LHsSigType GhcPs -> SDoc
 sigTypeAt o pos (L _ (HsSig _ outer body)) = case outer of
   HsOuterImplicit _ -> typ o pos body
-  HsOuterExplicit _ bs -> form (text "forall") (map (tyVarBndr o specFlag . unLoc) bs ++ [typ o TTop body])
+  HsOuterExplicit _ bs -> form (text "forall" <+> hsep (map (tyVarBndr o specFlag . unLoc) bs)) [typ o TTop body]
 
 forallTele :: PrintOpts -> HsForAllTelescope GhcPs -> SDoc -> SDoc
 forallTele o tele body = case tele of
-  HsForAllInvis _ bs -> form (text "forall") (map (tyVarBndr o specFlag . unLoc) bs ++ [body])
-  HsForAllVis _ bs -> form (text "forall") (map (tyVarBndr o (const id) . unLoc) bs ++ [text "->", body])
+  HsForAllInvis _ bs -> form (text "forall" <+> hsep (map (tyVarBndr o specFlag . unLoc) bs)) [body]
+  HsForAllVis _ bs -> form (text "forall" <+> hsep (map (tyVarBndr o (const id) . unLoc) bs) <+> text "->") [body]
 
 -- | A type at a position: implicit parentheses per SPEC I5.
 typ :: PrintOpts -> TPos -> LHsType GhcPs -> SDoc
@@ -891,7 +891,7 @@ typeForm :: PrintOpts -> HsType GhcPs -> SDoc
 typeForm o = \case
   HsForAllTy _ tele body -> forallTele o tele (typ o TTop body)
   HsQualTy _ (L _ (HsContext _ cs)) body ->
-    form (text "=>") (map (typ o TCtxElem) cs ++ [typ o TTop body])
+    form (text "=>" <+> hsep (map (typ o TCtxElem) cs)) [typ o TTop body]
   HsTyVar _ prom n -> promoted prom (lname n)
   t@HsAppTy{} -> typeApp o t
   t@HsAppKindTy{} -> typeApp o t
