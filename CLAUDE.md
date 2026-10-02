@@ -2,10 +2,11 @@
 
 This is a fork of GHC that adds a second front end to the compiler. It
 accepts GHC Haskell written as Clojure/EDN-style s-expressions, in `.hsl`
-files. The design lives in `ghclisp/DESIGN.md`. It is still being worked out
-with the user, one iteration at a time. Read it first, and ask the user
-before settling any open decision (D1, D2, ...). When a decision is settled,
-record it in the "Decided" section of that file. The sister project is
+files. The design lives in `ghclisp/DESIGN.md`. The normative per-form grammar is
+`ghclisp/SPEC.md`. Read both first. This is a pathfinder implementation:
+when a new design choice comes up, take the recommended option, record it
+(DESIGN.md "Decided" log or SPEC.md §12) and keep going; the user reviews
+the log rather than each choice. The sister project is
 go-lisp (github.com/arbace/go-lisp), which did the same for Go.
 
 ## Git rules (hard)
