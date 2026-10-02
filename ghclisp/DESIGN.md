@@ -1,6 +1,6 @@
 # ghc-lisp: design notes (living document)
 
-Status: **draft v2**. The syntax is not settled. Every open decision has an
+Status: **draft v3**. The syntax is not settled. Every open decision has an
 ID (D1, D2, ...) so we can talk about it and update it. Settled decisions
 move to the "Decided" log at the bottom. Sister project: go-lisp
 (github.com/arbace/go-lisp), whose decisions are the starting point here.
@@ -70,7 +70,7 @@ Foo.hs ──┴─ GHC.Parser.parseModule ───────┴──> HsMod
 - Haddock, HLS, `ghc-exactprint` stay Haskell-only. Until they support Lisp,
   tools can run on the converted `.hs` output.
 
-## 4. Syntax sketch (v1; follows D3, D4, D5, D10, the rest is open)
+## 4. Syntax sketch (v2; follows the decided D-items, the rest is open)
 
 ```clojure
 (:language LambdaCase ScopedTypeVariables)      ; {-# LANGUAGE ... #-}   (D10)
@@ -83,7 +83,7 @@ Foo.hs ──┴─ GHC.Parser.parseModule ───────┴──> HsMod
 
   (data Shape                                   ; data Shape = Circle Double | Rect { w, h :: Double }
     (Circle Double)
-    (Rect [w h Double])
+    (Rect (:: w h Double))                      ; record fields (D5)
     (deriving Show Eq))
 
   (:: area (-> Shape Double))                   ; area :: Shape -> Double
@@ -108,11 +108,7 @@ Foo.hs ──┴─ GHC.Parser.parseModule ───────┴──> HsMod
 
 ## 5. Open decisions
 
-**D1. Heads for forms with no Haskell keyword.** Carry over go-lisp D1:
-EDN keyword heads (`:tuple`, `:infix`, `:list`, `:as`, ...). Haskell
-wrinkle: constructor operators start with `:` (`:`, `:|`, `:+:`). The
-reader can tell them apart: a keyword is `:` followed by a letter or `_`;
-`:` followed by symbol characters is a constructor operator. Recommended.
+**D1. Heads.** Decided (2026-10-02): EDN keywords. See the log.
 
 **D2. Lexemes.** EDN structure (lists, vectors, `#_`; `{}`, `#{}`, `#tag`
 reserved) plus Haskell's own literal grammar: strings with Haskell escapes
@@ -124,38 +120,21 @@ TH name quotes (`'Just`, `''T`). Multiline strings (`"""`) maybe later.
 
 **D3. Names.** Decided (2026-10-02): verbatim. See the log.
 
-**D4. Operators and fixity.** Decided (2026-10-02): chains plus `:infix`.
-See the log. Still open within D4: sections. `(+ 1)` is a plain partial
-application, which is a different AST from a section, so sections need
-their own forms (`(:section-l a +)` / `(:section-r + b)`?).
+**D4. Operators and fixity.** Decided (2026-10-02): chains plus `:infix`;
+sections are `:section-l` / `:section-r`. See the log.
 
-**D5. Vectors.** Decided (2026-10-02): Haskell brackets. See the log.
-Still open within D5: record fields. The sketch's `(Rect [w h Double])`
-clashes with a constructor field of list type, `(Circle [Double])`. Record
-constructors need their own shape, such as `(Rect (:: w h Double))`.
+**D5. Vectors.** Decided (2026-10-02): Haskell brackets; record fields
+are `(:: fields... Type)` groups. See the log.
 
-**D6. Tuples and unit.** `,` is whitespace in EDN. `(:tuple a b)`,
-`(:tuple a :_)` for tuple sections, `(:utuple a b)` for `(# a, b #)`, and
-`()` for unit? Or keep `,` as a symbol: `(, a b)`.
+**D6. Tuples.** Decided (2026-10-02): `(:tuple ...)` and `()`. See the log.
 
-**D7. Bindings.** Function equations are separate `(= lhs rhs)` forms,
-merged into one `FunBind` exactly as GHC merges adjacent equations. The
-lhs is `(f p1 p2)`, or `(:infix x <+> y)` for an infix definition. Guards
-are `(| guard... rhs)` clauses, and `(where binding...)` goes last.
-Signatures are `(:: name... type)`. The same shapes appear at top level, in
-`let`, `where`, `class` and `instance` bodies.
+**D7. Bindings.** Decided (2026-10-02): `(= lhs rhs)` forms. See the log.
 
 **D8. Layout.** S-expressions replace layout: `do`, `let`, `where`, `case`,
 `class`, `instance`, `\case` bodies are the form's remaining elements.
 No braces, no semicolons.
 
-**D9. Haskell vocabulary, Lisp shape.** Heads are Haskell keywords and
-reserved operators: `case`, `of`?, `if`, `do`, `mdo`, `let`, `where`, `\`,
-`\case`, `->`, `<-`, `=>`, `::`, `=`, `|`, `@`, `~`, `!`, `data`,
-`newtype`, `type`, `class`, `instance`, `deriving`, `forall`, `import`,
-`module`, `foreign`, `pattern`, ... No Clojure aliases (`defn`, `fn`, ...).
-Contextual words (`qualified`, `as`, `hiding`, `family`, `stock`, `via`)
-stay contextual.
+**D9. Vocabulary.** Decided (2026-10-02): Haskell words. See the log.
 
 **D10. Pragmas.** Decided (2026-10-02): forms before `module`. See the
 log.
@@ -235,3 +214,44 @@ quasiquotes `(:qq name "raw text")`, whose body stays text.
   `(:language GADTs LambdaCase)`, `(:options-ghc "-Wall")`, ... The
   downsweep reads them with the Lisp reader. Pragmas inside the code
   (`INLINE`, `RULES`, `UNPACK`, ...) are forms as well.
+- **D4 sections (2026-10-02).** `(:section-l a op)` is `(a op)` and
+  `(:section-r op b)` is `(op b)`; a plain name as `op` is a backtick
+  operator: `(:section-r div 2)` is ``(`div` 2)``. `(+ 1)` stays an ordinary
+  application of `(+)` to `1`. Note: Haskell reads `(- 1)` as negation,
+  not a section, except under `LexicalNegation`; `(:section-r - 1)` is the
+  section that `LexicalNegation` writes as `(- 1)`. SPEC decides whether it
+  is accepted without that extension.
+- **D5 record fields (2026-10-02).** A record constructor's field groups
+  reuse the signature form: `(Rect (:: w h Double) (:: name String))` is
+  `Rect { w, h :: Double, name :: String }`. A constructor with no `::`
+  group is positional, so `(Circle [Double])` has one field of list type.
+  Strictness and unpacking wrap the type: `(! String)`, `(~ T)`, and the
+  `UNPACK` pragma is a form (exact shape in SPEC).
+- **D1 (2026-10-02): keyword heads.** Forms with no Haskell keyword use EDN
+  keyword heads: `:tuple`, `:infix`, `:as`, `:section-l`, ... A keyword
+  can never be a Haskell name, so every name stays writable. The reader
+  tells keywords from constructor operators: `:` followed by a letter or
+  `_` is a keyword (`:tuple`, `:_`); `:` followed by symbol characters is a
+  constructor operator (`:`, `:|`, `:+:`).
+- **D6 (2026-10-02): tuples.** `(:tuple a b)` is `(a, b)`, as an
+  expression, a pattern, and a type. In a tuple section `:_` marks a
+  missing slot: `(:tuple a :_)` is `(a,)`. Unboxed tuples are
+  `(:utuple a b)`. `()` is unit (expression, pattern, and type). The comma
+  stays whitespace, as in EDN.
+- **D7 (2026-10-02): bindings are `(= lhs rhs)` forms.** Each equation is
+  its own form: `(= (f p1 p2) rhs)`, and adjacent equations for the same
+  name merge into one `FunBind` exactly as GHC merges them. An infix lhs is
+  `(:infix x <+> y)`. Guarded right-hand sides are clauses
+  `(| qual... rhs)` (a guard may hold several qualifiers), and
+  `(where binding...)` comes last. Signatures are `(:: name... type)`.
+  The same shapes are used at top level and in `let`, `where`, `class` and
+  `instance` bodies.
+- **D9 (2026-10-02): Haskell vocabulary, Lisp shape.** Heads are Haskell
+  keywords and reserved operators: `case`, `if`, `do`, `mdo`, `let`,
+  `where`, `\`, `\case`, `->`, `<-`, `=>`, `::`, `=`, `|`, `data`,
+  `newtype`, `type`, `class`, `instance`, `deriving`, `forall`, `import`,
+  `module`, `foreign`, `pattern`, ... Contextual words (`qualified`, `as`,
+  `hiding`, `family`, `stock`, `via`) keep their Haskell roles in their
+  contexts. No Clojure aliases (`fn`, `defn`, ...). Examples:
+  `(\ x y (+ x y))`, `(case m (-> Nothing 0) (-> (Just x) x))`,
+  `(let (= n 1) (* n 2))`, `(import qualified Data.Map as M)`.
