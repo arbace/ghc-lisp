@@ -62,6 +62,17 @@ The goal is painless merges from upstream GHC.
 - Behavioral test: `ghclisp/run-corpus.sh _build/stage1/bin/ghc` (about
   10 minutes).
 - Testsuite: `hadrian/build -j --flavour=quick --freeze1 test
-  --only="lisp001 lisp002 ..."` (tests in `testsuite/tests/ghclisp`).
+  --test-root-dirs=testsuite/tests/ghclisp` (11 tests).
+- Haddock: `ghc --lisp-check -haddock FILE.hs` also compares the attached
+  documentation (about 86% of source files today; see DESIGN.md).
+- Vim: `ghclisp/vim/test.sh _build/stage1/bin/ghc FILE.hs...` checks that
+  `gg=G` keeps the printer's layout. If you change the printer's layout,
+  keep `ghclisp/vim/indent/ghclisp.vim` in step (lists indent three columns
+  past `(`, vectors one past `[`).
+- cabal: `ghclisp/cabal/build-cabal.sh` builds a cabal-install that finds
+  `.hsl` modules (a patch to the Cabal submodule; don't commit inside
+  `libraries/Cabal`).
 - Convert: `ghc --hs2lisp X.hs`, `ghc --lisp2hs X.hsl`. Compile `.hsl`
-  files like `.hs` files.
+  files like `.hs` files. User guide: `ghclisp/README.md`.
+- Don't run `_build/stage1/bin/ghc` while hadrian is relinking it (bus
+  errors).
