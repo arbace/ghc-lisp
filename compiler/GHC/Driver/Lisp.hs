@@ -103,8 +103,9 @@ printLisp dflags opts (L _ m) =
   renderWithContext ctx (lispHeaderPragmas exts others $$ text "" $$ lispModule popts m) ++ "\n"
   where
     ctx = initSDocContext dflags defaultUserStyle
+    -- The module was parsed after CPP, so the Lisp file doesn't need it.
     exts = [ drop 2 o | o <- opts, "-X" `isPrefixOf` o, o /= "-XCPP" ]
-    others = [ o | o <- opts, not ("-X" `isPrefixOf` o) ]
+    others = [ o | o <- opts, not ("-X" `isPrefixOf` o), o /= "-cpp" ]
     popts = PrintOpts (parenOpts dflags)
 
 parenOpts :: DynFlags -> ParenOpts

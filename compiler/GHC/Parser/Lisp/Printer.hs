@@ -1104,7 +1104,7 @@ doExpr o flav stmts = case flav of
     qualDocs (L _ s) = case s of
       TransStmt { trS_stmts = prev } -> concatMap qualDocs prev ++ [stmt o s]
       ParStmt _ blocks _ _ ->
-        intersperseBar [ map (stmt o . unLoc) ss | ParStmtBlock _ ss _ _ <- toList blocks ]
+        intersperseBar [ concatMap qualDocs ss | ParStmtBlock _ ss _ _ <- toList blocks ]
       _ -> [stmt o s]
     intersperseBar = \case
       [] -> []

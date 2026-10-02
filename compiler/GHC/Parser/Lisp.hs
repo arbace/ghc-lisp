@@ -81,9 +81,7 @@ parseLispModule opts buf loc =
 -- @(:options-ghc ...)@ forms before everything else, as GHC flags
 -- (@-XGADTs@, @-Wall@). Used by the downsweep.
 lispHeaderOptions :: ParserOpts -> StringBuffer -> RealSrcLoc -> [Located String]
-lispHeaderOptions opts buf loc = case readForms opts buf loc of
-  Left _ -> []
-  Right (forms, _) -> concatMap opt (takeWhile isHeader forms)
+lispHeaderOptions opts buf loc = concatMap opt (readFormsWhile isHeader opts buf loc)
   where
     isHeader f = case formNode f of
       FList (Form _ (FKeyword k) : _) -> k `elem` map fsLit ["language", "options-ghc", "options-haddock"]
@@ -121,11 +119,11 @@ lispOptionsFromFile :: ParserOpts -> FilePath -> IO (Messages PsMessage, [Locate
 lispOptionsFromFile opts file = do
   buf <- hGetStringBuffer file
   let os = lispHeaderOptions opts buf (mkRealSrcLoc (mkFastString file) 1 1)
-      cpp = [ o | o@(L _ "-XCPP") <- os ]
+      cpp = [ o | o@(L _ f) <- os, f `elem` ["-XCPP", "-cpp"] ]
       errs = [ mkPlainErrorMsgEnvelope sp $ PsUnknownMessage $ mkSimpleUnknownDiagnostic $
                  mkPlainError noHints (text "CPP is not supported in .hsl files")
              | L sp _ <- cpp ]
-  pure (mkMessages (listToBag errs), filter (\(L _ o) -> o /= "-XCPP") os)
+  pure (mkMessages (listToBag errs), filter (\(L _ o) -> o `notElem` ["-XCPP", "-cpp"]) os)
 
 -------------------------------------------------------------------------------
 -- Errors and locations

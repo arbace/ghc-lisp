@@ -12,6 +12,7 @@ module GHC.Parser.Lisp.Reader
   , DocComment(..)
   , DocKind(..)
   , readForms
+  , readFormsWhile
   , formSpan
   , formPsSpan
   ) where
@@ -82,6 +83,21 @@ readForms opts buf0 rloc0 = go [] [] (skipShebang (PsLoc rloc0 (BufPos 0), buf0)
         | otherwise -> do
             (f, st'') <- readForm opts st'
             go (maybe acc (: acc) f) (docs' ++ docs) st''
+
+-- | Read top-level forms while they satisfy the predicate, and stop at the
+-- first one that doesn't (or at the first error). The file header (its
+-- (:language ...) forms) is read this way, before the extensions that the
+-- rest of the file may need are known.
+readFormsWhile :: (Form -> Bool) -> ParserOpts -> StringBuffer -> RealSrcLoc -> [Form]
+readFormsWhile p opts buf0 rloc0 = go (skipShebang (PsLoc rloc0 (BufPos 0), buf0))
+  where
+    go st = case skipWs st of
+      (_, st')
+        | atEnd (snd st') -> []
+        | otherwise -> case readForm opts st' of
+            Right (Just f, st'') | p f -> f : go st''
+            Right (Nothing, st'') -> go st''
+            _ -> []
 
 type St = (PsLoc, StringBuffer)
 
@@ -308,7 +324,9 @@ lexOne opts st@(l, buf)
 
 lexOneIn :: ParserOpts -> St -> Either ReadErr (Token, St)
 lexOneIn opts (l@(PsLoc rl _), buf) =
-  let pst0 = (initParserState opts buf rl) { loc = l }
+  -- Start in the ordinary lexer state, not at the beginning of a line,
+  -- where a # would start a line directive.
+  let pst0 = (initParserState opts buf rl) { loc = l, lex_state = [0] }
   in case unP (lexer False return) pst0 of
        PFailed pst -> Left (mkPsSpan l (loc pst), "lexical error")
        POk pst (L sp tok)
