@@ -1,6 +1,6 @@
 # ghc-lisp: design notes (living document)
 
-Status: **draft v1**. The syntax is not settled. Every open decision has an
+Status: **draft v2**. The syntax is not settled. Every open decision has an
 ID (D1, D2, ...) so we can talk about it and update it. Settled decisions
 move to the "Decided" log at the bottom. Sister project: go-lisp
 (github.com/arbace/go-lisp), whose decisions are the starting point here.
@@ -70,14 +70,14 @@ Foo.hs ──┴─ GHC.Parser.parseModule ───────┴──> HsMod
 - Haddock, HLS, `ghc-exactprint` stay Haskell-only. Until they support Lisp,
   tools can run on the converted `.hs` output.
 
-## 4. Syntax sketch (v0, every line is up for discussion)
+## 4. Syntax sketch (v1; follows D3, D4, D5, D10, the rest is open)
 
 ```clojure
 (:language LambdaCase ScopedTypeVariables)      ; {-# LANGUAGE ... #-}   (D10)
 
-(module Data.Shape [Shape (..) area mk-square]  ; module Data.Shape (Shape(..), area, mkSquare) where
-                                                ; ^ names: D3
-  (import Data.List [sort-by])                  ; import Data.List (sortBy)
+(module Data.Shape [Shape (..) area mkSquare]   ; module Data.Shape (Shape(..), area, mkSquare) where
+                                                ; names verbatim (D3)
+  (import Data.List [sortBy])                   ; import Data.List (sortBy)
   (import qualified Data.Map.Strict as M)       ; Haskell's own words (D9)
   (import Prelude hiding [lookup])
 
@@ -99,9 +99,9 @@ Foo.hs ──┴─ GHC.Parser.parseModule ───────┴──> HsMod
 
   (:: main (IO ()))
   (= main
-    (do (<- xs (fmap lines get-contents))       ; xs <- lines <$> getContents
+    (do (<- xs (fmap lines getContents))        ; xs <- lines <$> getContents
         (let (= n (length xs)))
-        (print (:tuple n (sort-by (comparing negate) [1 2 3])))   ; (D5, D6)
+        (print (:tuple n (sortBy (comparing negate) [1 2 3])))   ; (D5, D6)
         (mapM_ (\case (-> 0 (pure ())) (-> k (print k))) [n])
         (print (:infix 1 + 2 * 3)))))           ; mixed chain, fixity left to the renamer (D4)
 ```
@@ -122,39 +122,17 @@ reserved) plus Haskell's own literal grammar: strings with Haskell escapes
 the reader has to tell apart from char literals and from promotion /
 TH name quotes (`'Just`, `''T`). Multiline strings (`"""`) maybe later.
 
-**D3. Names.** Haskell gets meaning from case (constructors and types
-uppercase, variables lowercase), and exports are explicit lists, so
-go-lisp's "exported by default" (its D18) doesn't apply. Options:
-  - (a) **verbatim**: names are Haskell names (`sortBy`, `foldl'`, `M.insert`).
-    Simplest; the mapping is the identity.
-  - (b) **kebab-case** for lowercase names: `sort-by` -> `sortBy`, with a
-    rule for names that already contain capitals, like go-lisp's.
-    Lisp-looking, but needs exemptions and escape rules, and error messages
-    show Haskell names.
+**D3. Names.** Decided (2026-10-02): verbatim. See the log.
 
-**D4. Operators and fixity.** GHC's parser doesn't know fixities: it builds
-operator chains flat and the renamer re-associates them, unless a node is
-wrapped in `HsPar`. Proposal:
-  - `(op a b c ...)` is the Haskell chain `a op b op c` — unresolved, so the
-    renamer applies the real fixity (`(- a b c)` is `(a - b) - c`, `(++ a b c)`
-    is `a ++ (b ++ c)`, `(== a b c)` is a fixity error, as in Haskell).
-  - `(:infix a + b * c)` is a mixed chain, exactly Haskell's `a + b * c`.
-    Operators in a chain are ordinary or backtick names (`(:infix a div b)`).
-  - A nested operator form gets `HsPar`, so the Lisp grouping always wins:
-    `(* (+ a b) c)` is `(a + b) * c`.
-  - `(- x)` with one argument is negation (`NegApp`).
-  - Sections: `(:section-l a +)` / `(:section-r + b)`? `(+ 1)` is a plain
-    partial application, which is a different AST from a section.
-  - The operator as a value is just the symbol: `(foldr + 0 xs)`.
+**D4. Operators and fixity.** Decided (2026-10-02): chains plus `:infix`.
+See the log. Still open within D4: sections. `(+ 1)` is a plain partial
+application, which is a different AST from a section, so sections need
+their own forms (`(:section-l a +)` / `(:section-r + b)`?).
 
-**D5. What are vectors?** Haskell has list syntax everywhere: list
-literals, list patterns, the list type `[a]`. Options:
-  - (a) **vectors are Haskell brackets**: `[1 2 3]`, pattern `[x y]`, type
-    `[Int]`. Syntax-only groupings (contexts, export lists, binders) use
-    lists or vectors positionally.
-  - (b) go-lisp's rule, **vectors are never expressions**: list literals are
-    `(:list 1 2 3)`, the list type `(:list-of Int)`, and vectors are kept
-    for syntax (contexts, import lists, record fields, binders).
+**D5. Vectors.** Decided (2026-10-02): Haskell brackets. See the log.
+Still open within D5: record fields. The sketch's `(Rect [w h Double])`
+clashes with a constructor field of list type, `(Circle [Double])`. Record
+constructors need their own shape, such as `(Rect (:: w h Double))`.
 
 **D6. Tuples and unit.** `,` is whitespace in EDN. `(:tuple a b)`,
 `(:tuple a :_)` for tuple sections, `(:utuple a b)` for `(# a, b #)`, and
@@ -179,14 +157,8 @@ reserved operators: `case`, `of`?, `if`, `do`, `mdo`, `let`, `where`, `\`,
 Contextual words (`qualified`, `as`, `hiding`, `family`, `stock`, `via`)
 stay contextual.
 
-**D10. Pragmas.** File-header pragmas (`LANGUAGE`, `OPTIONS_GHC`) must be
-readable by the downsweep before the full parse. Options:
-  - (a) forms before `module`: `(:language GADTs)`, `(:options-ghc "-Wall")`.
-  - (b) directive comments like go-lisp D7: `;#language GADTs`.
-
-  Pragmas inside the code (`INLINE`, `SPECIALISE`, `RULES`, `UNPACK`,
-  `SCC`, `COMPLETE`, `MINIMAL`, `OVERLAPPING`, ...) are AST nodes, so they
-  are forms either way.
+**D10. Pragmas.** Decided (2026-10-02): forms before `module`. See the
+log.
 
 **D11. CPP.** Options:
   - (a) no CPP in `.hsl` for now. Converting a CPP'd `.hs` file captures one
@@ -237,3 +209,29 @@ quasiquotes `(:qq name "raw text")`, whose body stays text.
 
 - **(2026-10-02) Branch and extension.** Work happens on the `ghc-lisp`
   branch; `master` mirrors upstream GHC. The file extension is `.hsl`.
+- **D3 (2026-10-02): names are verbatim.** A Lisp name is the Haskell name,
+  spelled the same: `sortBy`, `foldl'`, `M.insert`, `:|`, `x#`. The mapping
+  is the identity: no kebab-case, no exemption lists, and error messages
+  already match the source. (go-lisp's D18 doesn't apply: Haskell gets
+  meaning from case and lists exports explicitly.)
+- **D4 (2026-10-02): operator forms are unresolved chains.** GHC's parser
+  doesn't know fixities and the renamer re-associates operator chains, so:
+  - `(op a b c ...)` with two or more operands is the Haskell chain
+    `a op b op c`, left unresolved for the renamer. `(++ a b c)` groups to the
+    right, `(- a b c)` to the left, and `(== a b c)` is a fixity error, all as
+    in Haskell.
+  - `(:infix a + b * c)` is a mixed chain, exactly Haskell's `a + b * c`.
+    The operators sit in the odd positions; a plain name there is a
+    backtick operator: `(:infix x div y)` is ``x `div` y``.
+  - An operator form nested as an operand is wrapped in `HsPar`, so the Lisp
+    grouping always wins: `(* (+ a b) c)` is `(a + b) * c`.
+  - `(- x)` with one operand is negation (`NegApp`).
+  - An operator used as a value is the bare symbol: `(foldr + 0 xs)`.
+- **D5 (2026-10-02): vectors are Haskell brackets.** `[1 2 3]` is a list
+  literal, `[x y]` a list pattern, and `[Int]` the list type. Vectors also
+  group syntax where the position makes that unambiguous (export and
+  import lists, for example); lists are used elsewhere.
+- **D10 (2026-10-02): file-header pragmas are forms before `module`.**
+  `(:language GADTs LambdaCase)`, `(:options-ghc "-Wall")`, ... The
+  downsweep reads them with the Lisp reader. Pragmas inside the code
+  (`INLINE`, `RULES`, `UNPACK`, ...) are forms as well.
