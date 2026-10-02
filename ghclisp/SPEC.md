@@ -402,3 +402,18 @@ Literal source text is compared exactly (D2).
 | S7 | Imports use Haskell's words in Haskell's order (`qualified`, `as`, `hiding`, `safe`, `splice`, `quote`, `:source`). |
 | S8 | Declaration heads are `(T tv*)`; kind signatures wrap them as `(:: head K)`. |
 | S9 | Named defaults are `(default C [T*])`. |
+
+Choices made while implementing (2026-10-02), on the same terms:
+
+| ID | Choice |
+|---|---|
+| S10 | `ActiveBefore` prints as `[~ 2]` (two tokens; `[~2]` would read as one). |
+| S11 | Built-in syntax names: `(:tuple-con n)`, `(:utuple-con n)` (`n` = 0 is `(# #)`), `(:usum-con n)` for the sum type constructor and `(:usum-con alt n)` for its data constructors; `(:name ->)` for the arrow. |
+| S12 | A record constructor declaration with no fields is `(:rec C)`. |
+| S13 | GADT record constructors: `(:: C (-> (:record (:: f T)...) R))`; a parenthesized GADT signature is `(:paren ...)` (`HsGadtPar`). |
+| S14 | An infix function lhs whose operands are unparenthesized constructor chains, `f :+ g <*> a :+ b`, is `(:infix f :+ g <*> a :+ b)`; the one variable operator is the function. |
+| S15 | `OverloadedRecordUpdate` fields are always paths: `(= (:get a) e)`, `(= (:get a b) e)`. |
+| S16 | A type argument that is an operator is `@(:name op)`; a prefix-applied promoted operator is `('(:name :) x xs)`. |
+| S17 | `(..)` in an export list is `..`; `T (data ..)` is `(data (T ..))`. |
+| S18 | Implicit parentheses (§9), refined by the corpus: negation and block forms are allowed in any operand (layout can close a block); a multi-way if is allowed as an argument; view patterns are allowed in tuple, list and record elements and as the result of a view pattern; any constraint is allowed in a context; a kind signature is allowed in a type quote and on the right of a type synonym. |
+| S19 | GHC's parser placeholders are reproduced: punned fields in constructions and patterns get `pun-right-hand-side`, parallel comprehensions `noExpr`; the last `do` statement stays a `BodyStmt`. |

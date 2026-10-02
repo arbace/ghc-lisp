@@ -48,7 +48,20 @@ The goal is painless merges from upstream GHC.
 - Bootstrap: the system `ghc` (9.14.1), `cabal`, `alex`, and `happy` 2.x
   from `/root/.local/bin` (Alpine's happy 1.21 is rejected by configure),
   so put `/root/.local/bin` first on `PATH`.
-- First build: `./boot && ./configure && hadrian/build -j --flavour=quick`.
-  The resulting compiler is `_build/stage1/bin/ghc`.
-- Fast rebuild loop after compiler changes: TBD (to be filled in once the
-  first change has been built).
+- First build: `./boot && ./configure && hadrian/build -j --flavour=quick`
+  (about 30 minutes). The compiler is `_build/stage1/bin/ghc`.
+- After changing the compiler: `hadrian/build -j --flavour=quick --freeze1
+  _build/stage1/bin/ghc` (about a minute; the stage-1 compiler and the
+  libraries are not rebuilt).
+- Round trip: `_build/stage1/bin/ghc --lisp-check FILE.hs...` prints OK or
+  FAIL per file; with `GHC_LISP_CHECK_OUT=DIR` it writes the Lisp text and
+  both AST dumps of failing files there. Run it over the corpus in
+  parallel, e.g. `find compiler libraries utils -name '*.hs' | xargs -P 60
+  -n 20 _build/stage1/bin/ghc --lisp-check | grep '^FAIL'`. Files reported
+  as ERROR don't parse as Haskell in isolation and are skipped.
+- Behavioral test: `ghclisp/run-corpus.sh _build/stage1/bin/ghc` (about
+  10 minutes).
+- Testsuite: `hadrian/build -j --flavour=quick --freeze1 test
+  --only="lisp001 lisp002 ..."` (tests in `testsuite/tests/ghclisp`).
+- Convert: `ghc --hs2lisp X.hs`, `ghc --lisp2hs X.hsl`. Compile `.hsl`
+  files like `.hs` files.

@@ -125,6 +125,31 @@ round-trip comparison) go into `ghclisp/SPEC.md`, written next.
    `.hsl` behave identically.
 5. Tooling: `hs2lisp` / `lisp2hs`, error messages, editor mode, cabal.
 
+## Status (2026-10-02)
+
+| Roadmap step | State |
+|---|---|
+| 1. Reader | done: `GHC/Parser/Lisp/Reader.hs`. EDN structure; every atom is lexed by GHC's own lexer with the file's extensions. |
+| 2. Printer (Haskell -> ghc-lisp) | done: `GHC/Parser/Lisp/Printer.hs`, `ghc --hs2lisp`. |
+| 3. Parser (ghc-lisp -> AST) | done: `GHC/Parser/Lisp.hs`, reusing `GHC.Parser.PostProcess`. The round trip (`ghc --lisp-check`) is exact for all 4,863 parseable Haskell files in `compiler/`, `libraries/`, `utils/`, `ghc/` and `hadrian/`, and for 11,410 of the 11,488 parseable files in `testsuite/tests` (99.3%). Files that GHC itself can't parse in isolation (CPP headers from build directories, default extensions from .cabal files, expected-failure tests) are skipped. |
+| 4. Compiler hooks | done: `ghc Foo.hsl`, `ghc --make` with mixed `.hs`/`.hsl` modules, GHCi `:load`, `runghc`, `-fhpc`. Diagnostics point into the `.hsl` source. Behavioral test: `ghclisp/run-corpus.sh` converts the testsuite's single-module should_run programs to `.hsl`; 1,069 behave identically to the Haskell originals (12 excluded: they print their own source locations or depend on timing). |
+| 5. Build tools | `--make` works; cabal does not know `.hsl` yet (Cabal is a submodule). |
+| 6. Tooling | `ghc --hs2lisp`, `ghc --lisp2hs` (GHC's pretty-printer), `ghc --lisp-check`; tests in `testsuite/tests/ghclisp`. |
+
+Upstream hooks, all marked (`git grep 'ghc-lisp:'`): the module list in
+`compiler/ghc.cabal.in`; `GHC.Driver.Phases` (the `.hsl` suffix),
+`GHC.Unit.Finder` (search `.hsl`), `GHC.Parser.Header` (header parse and
+file options), `GHC.Driver.Main.Passes` (module parse); the mode flags and
+dispatch in `ghc/` (`--hs2lisp`, `--lisp2hs`, `--lisp-check`).
+
+### Known limits
+
+- Haddock comments (`;;|`, D12) are read but not yet attached to the tree,
+  and `hs2lisp` drops comments.
+- Multiline strings (`"""`) are not read yet (D2).
+- Diagnostics print expressions in Haskell syntax (names are the same, D3).
+- cabal doesn't find `.hsl` modules.
+
 ## Decided
 
 - **(2026-10-02) Branch and extension.** Work happens on the `ghc-lisp`
