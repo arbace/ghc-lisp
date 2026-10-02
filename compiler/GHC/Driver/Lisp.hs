@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -50,7 +51,10 @@ import Control.Exception (handle, SomeException)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import Data.Data
-import Data.List (isPrefixOf, isSuffixOf)
+import Data.List (isPrefixOf, isSuffixOf, sortOn, intercalate)
+import Data.Foldable (toList)
+import Data.List.NonEmpty (NonEmpty(..))
+import GHC.Hs.DocString
 import Data.ByteString (ByteString)
 import GHC.Types.Name (Name, getOccString)
 import GHC.Types.Name.Occurrence
@@ -87,8 +91,10 @@ parseHsFile hsc_env file = do
   pp <- preprocess hsc_env file Nothing Nothing
   case pp of
     Left msgs -> throwErrors (initSourceErrorContext (hsc_dflags hsc_env)) (GhcDriverMessage <$> msgs)
-    Right (dflags, hspp) -> do
-      let popts = initParserOpts dflags
+    Right (dflags0, hspp) -> do
+      -- keep comments in the tree, so that hs2lisp can print them
+      let dflags = gopt_set dflags0 Opt_KeepRawTokenStream
+          popts = initParserOpts dflags
       (_, opts) <- getOptionsFromFile popts (initSourceErrorContext dflags)
                      (supportedLanguagesAndExtensions (platformArchOS (targetPlatform dflags))) file
       buf <- hGetStringBuffer hspp
@@ -97,16 +103,106 @@ parseHsFile hsc_env file = do
         PFailed pst -> throwErrors (initSourceErrorContext dflags) (GhcPsMessage <$> getPsErrorMessages pst)
         POk _ m -> pure (dflags, map unLoc opts, m)
 
--- | Print a parsed module as Lisp, with its header pragmas.
+-- | Print a parsed module as Lisp, with its header pragmas and comments.
 printLisp :: DynFlags -> [String] -> Located (HsModule GhcPs) -> String
-printLisp dflags opts (L _ m) =
+printLisp dflags opts lm@(L _ m) =
+  insertComments comments $
   renderWithContext ctx (lispHeaderPragmas exts others $$ text "" $$ lispModule popts m) ++ "\n"
   where
     ctx = initSDocContext dflags defaultUserStyle
     -- The module was parsed after CPP, so the Lisp file doesn't need it.
     exts = [ drop 2 o | o <- opts, "-X" `isPrefixOf` o, o /= "-XCPP" ]
     others = [ o | o <- opts, not ("-X" `isPrefixOf` o), o /= "-cpp" ]
-    popts = PrintOpts (parenOpts dflags)
+    comments = moduleComments lm
+    popts = PrintOpts (parenOpts dflags) (map fst comments) False
+
+-- | The comments of a parsed Haskell module, in ghc-lisp syntax, with their
+-- source positions. Haddock comments keep their meaning: @-- |@ becomes
+-- @;;|@, @-- ^@ @;;^@, and so on; other comments become @;;@ comments.
+-- File-header pragmas are left out (they are printed as forms).
+moduleComments :: Located (HsModule GhcPs) -> [((Int, Int), [String])]
+moduleComments m = sortOn fst [ (pos c, lisp (ac_tok (unLoc c))) | c <- collect m, keep (ac_tok (unLoc c)) ]
+  where
+    collect :: forall a. Data a => a -> [LEpaComment]
+    collect x = case cast x of
+      Just (c :: LEpaComment) -> [c]
+      Nothing -> concat (gmapQ collect x)
+    pos (L l _) = case l of
+      EpaSpan (RealSrcSpan r _) -> (srcSpanStartLine r, srcSpanStartCol r)
+      _ -> (0, 0)
+    keep = \case
+      EpaBlockComment t -> not ("{-#" `isPrefixOf` t)
+      EpaLineComment _ -> True
+      EpaDocComment _ -> True
+      _ -> False
+    lisp = \case
+      -- GHC's rules: a line doc is "-- " and a decorator, a block doc "{-",
+      -- an optional space and a decorator.
+      EpaLineComment t -> case drop 2 t of
+        ' ' : c : r | isDocSym c -> [";;" ++ c : r]
+        r -> [";;" ++ plain r]
+      EpaBlockComment t ->
+        let body = dropEnd 2 (drop 2 t)
+            (first, doc) = case body of
+              c : r | isDocSym c -> (c : r, True)
+              ' ' : c : r | isDocSym c -> (c : r, True)
+              r -> (r, False)
+        in case lines first of
+             (l1 : ls) | doc -> (";;" ++ l1) : map ((";;" ++) . continuation) ls
+                       | otherwise -> (";;" ++ plain l1) : map ((";;" ++) . plain) ls
+             [] -> [";;"]
+      -- with -haddock, doc comments are lexed as such
+      EpaDocComment ds -> docLines ds
+      _ -> []
+    isDocSym c = c `elem` ("|^$*" :: String)
+    -- a line of a nested doc comment that wouldn't continue a Lisp doc
+    -- comment as it is is escaped with a backslash
+    continuation r = case r of
+      c : _ | isDocSym c || c == '-' || c == '\\' -> '\\' : r
+      ' ' : '$' : _ -> '\\' : r
+      _ -> r
+    -- a plain comment must not start with a decorator in Lisp
+    plain r = case r of
+      c : _ | isDocSym c -> ' ' : r
+      _ -> r
+    docLines = \case
+      MultiLineDocString _ dec (c :| cs) ->
+        (";;" ++ decorator dec ++ chunk c) : map ((";;" ++) . chunk) cs
+      NestedDocString _ dec c -> case lines (chunk c) of
+        (l1 : ls) -> (";;" ++ decorator dec ++ l1) : map ((";;" ++) . continuation) ls
+        [] -> [";;" ++ decorator dec]
+      GeneratedDocString{} -> []
+    chunk (L _ c) = unpackHDSC c
+    decorator = \case
+      HsDocStringNext -> "|"
+      HsDocStringPrevious -> "^"
+      HsDocStringNamed n -> "$" ++ n
+      HsDocStringGroup n -> replicate n '*'
+    dropEnd n xs = take (length xs - n) xs
+
+-- | Put comments back in front of the printed lines they precede in the
+-- source, using the position markers the printer leaves at the start of
+-- lines (see 'GHC.Parser.Lisp.Printer.mark'), and remove the markers.
+insertComments :: [((Int, Int), [String])] -> String -> String
+insertComments comments0 = unlines . go comments0 . lines
+  where
+    go cs [] = concatMap snd cs
+    go cs (l : ls) =
+      let (ind, rest) = span (== ' ') l
+          clean = ind ++ stripMarkers rest
+      in case rest of
+           '\1' : r | (p, _) <- marker r ->
+             let (now, later) = span ((< p) . fst) cs
+             in map (ind ++) (concatMap snd now) ++ clean : go later ls
+           _ -> clean : go cs ls
+    marker r = case break (== '\2') r of
+      (pos, rest) -> case break (== ':') pos of
+        (a, ':' : b) -> ((read a, read b), drop 1 rest)
+        _ -> ((0, 0), rest)
+    stripMarkers = \case
+      '\1' : r -> stripMarkers (drop 1 (dropWhile (/= '\2') r))
+      c : r -> c : stripMarkers r
+      [] -> []
 
 parenOpts :: DynFlags -> ParenOpts
 parenOpts dflags = ParenOpts
@@ -208,6 +304,7 @@ astDump = unlines . go 0
           SourceText t | "{-#" `isPrefixOf` unpackFS t -> "NoSourceText"
           SourceText t -> "SourceText " ++ show (unpackFS t)
           NoSourceText -> "NoSourceText"
+      | Just (ds :: HsDocString GhcPs) <- cast x = leaf ("DocString " ++ docText ds)
       | Just (r :: Rational) <- cast x = leaf (show r)
       | Just (b :: ByteString) <- cast x = leaf (show b)
       | otherwise =
@@ -224,6 +321,14 @@ astDump = unlines . go 0
       | isTcOcc o = "tc"
       | isDataOcc o = "d"
       | otherwise = "?"
+
+-- | A doc string's decorator and text: nested (@{-| -}@) and line (@-- |@)
+-- doc comments with the same text compare equal (SPEC.md N3).
+docText :: HsDocString GhcPs -> String
+docText = \case
+  MultiLineDocString _ dec cs -> show dec ++ " " ++ show (intercalate "\n" (map (unpackHDSC . unLoc) (toList cs)))
+  NestedDocString _ dec c -> show dec ++ " " ++ show (unpackHDSC (unLoc c))
+  GeneratedDocString _ c -> "generated " ++ show (unpackHDSC c)
 
 -- | Values that the round trip does not compare: positions and exact-print
 -- annotations (DESIGN.md D13).

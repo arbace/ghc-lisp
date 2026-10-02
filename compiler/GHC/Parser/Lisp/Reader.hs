@@ -56,17 +56,18 @@ instance Outputable Form where
                     <> ppr f
 
 -- | A Haddock comment (@;;|@, @;;^@, @;;*@, @;;$name@) and its continuation
--- lines (DESIGN.md D12).
+-- lines (DESIGN.md D12). As in GHC's lexer, a line's text is everything
+-- after the marker (or after @;;@ on a continuation line), spaces included.
 data DocComment = DocComment
   { dcSpan  :: !PsSpan
   , dcKind  :: !DocKind
-  , dcLines :: [String]
+  , dcLines :: [(PsSpan, String)]
   }
 
 data DocKind
   = DocNext            -- ^ @;;|@
   | DocPrev            -- ^ @;;^@
-  | DocGroup !Int      -- ^ @;;*@, @;;**@, ...
+  | DocSection !Int    -- ^ @;;*@, @;;**@, ...
   | DocNamed String    -- ^ @;;$name@
   deriving (Eq, Show)
 
@@ -81,8 +82,8 @@ readForms opts buf0 rloc0 = go [] [] (skipShebang (PsLoc rloc0 (BufPos 0), buf0)
       (docs', st')
         | atEnd (snd st') -> Right (reverse acc, reverse (docs' ++ docs))
         | otherwise -> do
-            (f, st'') <- readForm opts st'
-            go (maybe acc (: acc) f) (docs' ++ docs) st''
+            (f, st'', inner) <- readFormDocs opts st'
+            go (maybe acc (: acc) f) (inner ++ docs' ++ docs) st''
 
 -- | Read top-level forms while they satisfy the predicate, and stop at the
 -- first one that doesn't (or at the first error). The file header (its
@@ -94,9 +95,9 @@ readFormsWhile p opts buf0 rloc0 = go (skipShebang (PsLoc rloc0 (BufPos 0), buf0
     go st = case skipWs st of
       (_, st')
         | atEnd (snd st') -> []
-        | otherwise -> case readForm opts st' of
-            Right (Just f, st'') | p f -> f : go st''
-            Right (Nothing, st'') -> go st''
+        | otherwise -> case readFormDocs opts st' of
+            Right (Just f, st'', _) | p f -> f : go st''
+            Right (Nothing, st'', _) -> go st''
             _ -> []
 
 type St = (PsLoc, StringBuffer)
@@ -148,26 +149,32 @@ docComment st0 = do
     ';':';':'^':r -> Just (DocPrev, r)
     ';':';':'$':r -> let (n, r') = break isSpace r in Just (DocNamed n, r')
     ';':';':r@('*':_) -> let (stars, r') = span (== '*') r
-                         in Just (DocGroup (length stars), r')
+                         in Just (DocSection (length stars), r')
     _ -> Nothing
   let (kind, rest0) = kind_rest
-      (ls, stEnd) = continuation [dropOneSpace rest0] stEnd0
+      (ls, stEnd) = continuation [(mkPsSpan l0 (fst stEnd0), rest0)] stEnd0
   pure (DocComment (mkPsSpan l0 (fst stEnd)) kind (reverse ls), stEnd)
   where
-    dropOneSpace (' ':r) = r
-    dropOneSpace r = r
     -- Following lines that are only ";;" + text, with no marker, continue.
     continuation acc st = case peek st of
       Just '\n' ->
-        let st1 = skipBlanks (snd (step st)) in
+        let st1@(l1, _) = skipBlanks (snd (step st)) in
         case lineText st1 of
-          (';':';':r, st2) | not (startsMarker r)
-            -> continuation (dropOneSpace r : acc) st2
+          (';':';':'\\':r, st2)
+            -> continuation ((mkPsSpan l1 (fst st2), r) : acc) st2
+          (';':';':r, st2) | continues r
+            -> continuation ((mkPsSpan l1 (fst st2), r) : acc) st2
           _ -> (acc, st)
       _ -> (acc, st)
-    startsMarker r = case r of
-      c:_ -> c `elem` ("|^$*" :: String)
-      _   -> False
+    -- As GHC's lexer (checkIfCommentLine): a following comment line
+    -- continues the doc unless it starts with another dash or is a named
+    -- chunk (" $"); a marker right after ";;" starts a new doc comment.
+    -- ";;\\" continues with the rest of the line as it is.
+    continues r = case r of
+      c : _ | c `elem` ("|^$*" :: String) -> False
+      '-' : _ -> False
+      ' ' : '$' : _ -> False
+      _ -> True
     skipBlanks st = case peek st of
       Just c | c == ' ' || c == '\t' -> skipBlanks (snd (step st))
       _ -> st
@@ -191,7 +198,11 @@ isDelim c = isSpace c || c `elem` (",()[]{};\"`" :: String)
 
 -- | Read one form. 'Nothing' for a form discarded by @#_@.
 readForm :: ParserOpts -> St -> Either ReadErr (Maybe Form, St)
-readForm opts st@(l0, _) = case peek st of
+readForm opts st = (\(f, st', _) -> (f, st')) <$> readFormDocs opts st
+
+-- | Read one form, and the Haddock comments inside it (newest first).
+readFormDocs :: ParserOpts -> St -> Either ReadErr (Maybe Form, St, [DocComment])
+readFormDocs opts st@(l0, _) = case peek st of
   Nothing -> Left (mkPsSpan l0 l0, "unexpected end of input")
   Just '(' -> seqForm ')' FList
   Just '[' -> seqForm ']' FVector
@@ -204,13 +215,13 @@ readForm opts st@(l0, _) = case peek st of
     let st2 = snd (step (snd (step st)))
         (_, st3) = skipWs st2
     (_, st4) <- readForm opts st3
-    pure (Nothing, st4)
+    pure (Nothing, st4, [])
   Just '#' | peek2 st == Just '{' ->
     reserved "#{ } sets are reserved"
   Just ':' | Just c2 <- peek2 st, isAlpha c2 || c2 == '_' -> do
     let (_, st1) = step st
         (name, st2) = spanSt (not . isDelim) st1
-    pure (Just (Form (mkPsSpan l0 (fst st2)) (FKeyword (fsLit name))), st2)
+    pure (Just (Form (mkPsSpan l0 (fst st2)) (FKeyword (fsLit name))), st2, [])
   Just '@' | Just c2 <- peek2 st, (not (isDelim c2) && not (isSymbolChar c2)) || c2 `elem` ("([\"" :: String) ->
     prefix PAt 1
   Just '\'' | peek2 st == Just '\'' -> prefix PTyQuote 2
@@ -220,16 +231,16 @@ readForm opts st@(l0, _) = case peek st of
 
     seqForm close mk = do
       let (_, st1) = step st
-      let loop acc s = case skipWs s of
-            (_, s') -> case peek s' of
+      let loop acc docs s = case skipWs s of
+            (docs', s') -> case peek s' of
               Nothing -> Left (mkPsSpan l0 l0, "unclosed " ++ openOf close)
               Just c | c == close ->
                 let (_, s'') = step s'
-                in Right (Just (Form (mkPsSpan l0 (fst s'')) (mk (reverse acc))), s'')
+                in Right (Just (Form (mkPsSpan l0 (fst s'')) (mk (reverse acc))), s'', docs' ++ docs)
               _ -> do
-                (f, s'') <- readForm opts s'
-                loop (maybe acc (: acc) f) s''
-      loop [] st1
+                (f, s'', inner) <- readFormDocs opts s'
+                loop (maybe acc (: acc) f) (inner ++ docs' ++ docs) s''
+      loop [] [] st1
     openOf ')' = "("
     openOf _   = "["
 
@@ -238,10 +249,10 @@ readForm opts st@(l0, _) = case peek st of
       case peek st1 of
         Just c | not (isDelim c) || c `elem` ("([\"" :: String) -> pure ()
         _ -> Left (mkPsSpan l0 (fst st1), "a prefix must be followed by a form")
-      (mf, st2) <- readForm opts st1
+      (mf, st2, inner) <- readFormDocs opts st1
       case mf of
         Nothing -> Left (mkPsSpan l0 (fst st2), "a prefix cannot apply to #_")
-        Just f  -> pure (Just (Form (mkPsSpan l0 (fst st2)) (FPrefix p f)), st2)
+        Just f  -> pure (Just (Form (mkPsSpan l0 (fst st2)) (FPrefix p f)), st2, inner)
 
     atom = case lexOne opts st of
       Left e -> Left e
@@ -256,14 +267,14 @@ readForm opts st@(l0, _) = case peek st of
               Just f@(Form _ (FAtom t)) | isNumeric t ->
                 let sp = mkPsSpan l0 (fst st2)
                     minus = Form (mkPsSpan l0 (fst st1)) (FAtom tok)
-                in pure (Just (Form sp (FList [minus, f])), st2)
+                in pure (Just (Form sp (FList [minus, f])), st2, [])
               _ -> Left (mkPsSpan l0 (fst st2),
                          "a symbol must be one Haskell lexeme; insert spaces")
         | Just c <- peek st1, not (isDelim c) ->
             Left (mkPsSpan l0 (fst (skipToDelim st1)),
                   "a symbol must be one Haskell lexeme; insert spaces")
         | otherwise ->
-            pure (Just (Form (mkPsSpan l0 (fst st1)) (FAtom tok)), st1)
+            pure (Just (Form (mkPsSpan l0 (fst st1)) (FAtom tok)), st1, [])
 
     skipToDelim s = case peek s of
       Just c | not (isDelim c) -> skipToDelim (snd (step s))

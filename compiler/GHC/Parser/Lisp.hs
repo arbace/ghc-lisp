@@ -25,6 +25,8 @@ import GHC.Prelude hiding (head)
 import GHC.Hs hiding (patNeedsParens)
 import GHC.Parser.Lexer
 import GHC.Parser.PostProcess
+import GHC.Parser.PostProcess.Haddock (addHaddockToModule)
+import GHC.Hs.DocString (mkHsDocStringChunk)
 import GHC.Parser (parseIdentifier)
 import GHC.Parser.HaddockLex (lexStringLiteral)
 import GHC.Parser.Errors.Types
@@ -62,6 +64,7 @@ import Data.List (isPrefixOf, isSuffixOf)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe (isJust, fromMaybe)
+import Data.List (find)
 
 -------------------------------------------------------------------------------
 -- Entry points
@@ -74,7 +77,32 @@ parseLispModule opts buf loc =
   where
     go = case readForms opts buf loc of
       Left (sp, msg) -> failSpan (mkSrcSpanPs sp) msg
-      Right (forms, _docs) -> moduleP forms
+      Right (forms, docs) -> do
+        -- Haddock comments go where GHC's lexer puts them, and the same
+        -- pass as for Haskell attaches them to the tree.
+        haddock <- getBit HaddockBit
+        when haddock $ P $ \st -> POk st { hdk_comments = hdk_comments st `appOL` toOL (map hdkComment docs) } ()
+        moduleP forms >>= addHaddockToModule
+
+-- | Tokens for the opening and closing bracket of a vector form.
+bracketTokens :: Form -> (EpToken o, EpToken c, [a])
+bracketTokens (Form (PsSpan r (BufSpan b1 b2)) _) =
+  ( tok (realSrcSpanStart r) b1
+  , tok (mkRealSrcLoc (srcSpanFile r) (srcSpanEndLine r) (srcSpanEndCol r - 1)) (BufPos (bufPos b2 - 1))
+  , [] )
+  where
+    tok l b = EpTok (EpaSpan (mkSrcSpanPs (mkPsSpan (PsLoc l b) (advancePsLoc (PsLoc l b) ' '))))
+
+-- | A ghc-lisp doc comment as the lexer's 'HdkComment'.
+hdkComment :: DocComment -> PsLocated HdkComment
+hdkComment (DocComment sp kind ls) = L sp $ case kind of
+  DocNext -> HdkCommentNext (str HsDocStringNext)
+  DocPrev -> HdkCommentPrev (str HsDocStringPrevious)
+  DocNamed n -> HdkCommentNamed n (str (HsDocStringNamed n))
+  DocSection n -> HdkCommentSection n (str (HsDocStringGroup n))
+  where
+    str dec = MultiLineDocString noExtField dec
+      (NE.fromList [ L (mkSrcSpanPs lsp) (mkHsDocStringChunk t) | (lsp, t) <- ls ])
 
 -- | Header options of a ghc-lisp file: @(:language ...)@ and
 -- @(:options-ghc ...)@ forms before everything else, as GHC flags
@@ -362,18 +390,21 @@ moduleP forms0 = do
   forM_ (takeWhile isHeaderPragma forms0) $ \h -> forM_ (fromMaybe [] (listOf h)) $ \x ->
     when (isName "CPP" x || isTok (\case ITstring _ _ s -> "-cpp" `elem` words (unpackHText s); _ -> False) x) $
       failAt x "CPP is not supported in .hsl files"
-  (name, warn, exports, rest) <- case forms1 of
+  (name, warn, exports, exportsF, rest) <- case forms1 of
     (f : fs) | Just args <- tokForm (\case ITmodule -> True; _ -> False) f -> do
       (n, w, e) <- moduleHead f args
-      pure (Just n, w, e, fs)
-    fs -> pure (Nothing, Nothing, Nothing, fs)
+      pure (Just n, w, e, find isVector args, fs)
+    fs -> pure (Nothing, Nothing, Nothing, Nothing, fs)
   let (importForms, declForms) = span isImport rest
   imports <- mapM importDecl importForms
   decls <- concat <$> mapM (topDecl TopCtx) declForms
   let sp = spanOf forms0
   pure $ L sp HsModule
     { hsmodExt = XModulePs
-        { hsmodAnn = noAnn
+        -- The export list's brackets delimit its Haddock comments.
+        { hsmodAnn = EpAnn (spanAsAnchor sp)
+            (noAnn { am_exports = maybe (noEpTok, noEpTok, []) bracketTokens exportsF })
+            emptyComments
         , hsmodLayout = EpNoLayout
         , hsmodDeprecMessage = warn
         , hsmodHaddockModHeader = Nothing }
@@ -383,6 +414,8 @@ moduleP forms0 = do
     , hsmodDecls = cvTopDecls (toOL decls)
     }
   where
+    isVector (Form _ (FVector _)) = True
+    isVector _ = False
     isHeaderPragma f = any (\k -> isJust (kwForm k f)) ["language", "options-ghc", "options-haddock"]
     isImport f = isJust (tokForm (\case ITimport -> True; _ -> False) f)
 

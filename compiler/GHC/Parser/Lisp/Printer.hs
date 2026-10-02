@@ -31,14 +31,41 @@ import Language.Haskell.Syntax.Text (HText, unpackHText)
 import GHC.Unit.Module.Warnings
 import GHC.Data.FastString
 import GHC.Utils.Outputable
+import qualified GHC.Utils.Ppr as Pretty
 
 import Data.List.NonEmpty (NonEmpty(..), toList)
 import qualified Data.List.NonEmpty as NE
 import Data.Char (isAlpha, isUpper, isDigit)
 import Data.Maybe (isJust)
+import qualified GHC.Data.Strict as Strict
 import Data.List (intersperse)
 
-data PrintOpts = PrintOpts { prParens :: ParenOpts }
+data PrintOpts = PrintOpts
+  { prParens   :: ParenOpts
+  , prComments :: [(Int, Int)]
+    -- ^ start positions (line, column) of the comments of the source, sorted.
+    -- A list that has a comment inside is printed one item per line, so
+    -- that the comment can go back in front of its item.
+  , prVertical :: Bool  -- ^ the type being printed has comments inside
+  }
+
+-- | Are there comments inside this span?
+hasComments :: PrintOpts -> SrcSpan -> Bool
+hasComments o (RealSrcSpan r _) =
+  any (\p -> p > (srcSpanStartLine r, srcSpanStartCol r) && p < (srcSpanEndLine r, srcSpanEndCol r))
+      (takeWhile (< (srcSpanEndLine r, srcSpanEndCol r)) (prComments o))
+hasComments _ _ = False
+
+-- | 'form', or one argument per line if the span has comments inside.
+formC :: PrintOpts -> SrcSpan -> SDoc -> [SDoc] -> SDoc
+formC o sp h as
+  | hasComments o sp, not (null as) = parens (hang h 2 (vcat as))
+  | otherwise = form h as
+
+vecC :: PrintOpts -> SrcSpan -> [SDoc] -> SDoc
+vecC o sp items
+  | hasComments o sp = brackets (vcat items)
+  | otherwise = vec items
 
 -- | Header pragmas: @(:language ...)@, @(:options-ghc ...)@.
 lispHeaderPragmas :: [String] -> [String] -> SDoc
@@ -51,12 +78,12 @@ lispModule o m = vcat (intersperse (text "") (header ++ imports ++ decls))
   where
     header = case hsmodName m of
       Nothing -> []
-      Just (L _ mn) ->
-        [ form (text "module" <+> ppr mn)
+      Just lmn@(L _ mn) ->
+        [ markL lmn <> form (text "module" <+> ppr mn)
             (maybe [] (\w -> [warningTxt w]) (hsmodDeprecMessage (hsmodExt m)) ++
-             maybe [] (\ies -> [ieList ies]) (hsmodExports m)) ]
-    imports = [ vcat (map (importDecl . unLoc) (hsmodImports m)) | not (null (hsmodImports m)) ]
-    decls = map (vcat . map (decl o TopCtx . unLoc)) (groupDecls (hsmodDecls m))
+             maybe [] (\ies -> [ieListC o (exportsRegion m) ies]) (hsmodExports m)) ]
+    imports = [ vcat (map (withMark importDecl) (hsmodImports m)) | not (null (hsmodImports m)) ]
+    decls = map (vcat . map (withMark (decl o TopCtx))) (groupDecls (hsmodDecls m))
 
 -- | Top-level declarations, grouped so that a type signature stays next to
 -- the binding it declares (no blank line between them).
@@ -82,6 +109,22 @@ formV h body = parens (hang h 2 (vcat body))
 
 vec :: [SDoc] -> SDoc
 vec = brackets . fsep
+
+-- | A zero-width marker of a node's source position. After rendering, the
+-- first marker on each line tells where the line's code came from, so that
+-- comments from the Haskell source can be put back in front of it (see
+-- GHC.Driver.Lisp.insertComments). The markers don't affect layout.
+mark :: SrcSpan -> SDoc
+mark (RealSrcSpan r _) = docToSDoc $ Pretty.zeroWidthText $
+  "\1" ++ show (srcSpanStartLine r) ++ ":" ++ show (srcSpanStartCol r) ++ "\2"
+mark _ = empty
+
+markL :: HasLoc l => GenLocated l a -> SDoc
+markL (L l _) = mark (getHasLoc l)
+
+-- | Print a located thing with its marker.
+withMark :: HasLoc l => (a -> SDoc) -> GenLocated l a -> SDoc
+withMark f x@(L _ a) = markL x <> f a
 
 todo :: String -> SDoc
 todo s = parens (text ":todo" <+> doubleQuotes (text s))
@@ -216,7 +259,22 @@ qualLit (QualLit _ mn v) = case v of
 -- Module header, imports, exports
 
 ieList :: [LIE GhcPs] -> SDoc
-ieList ies = vec (map (ie . unLoc) ies)
+ieList ies = vec (map (withMark ie) ies)
+
+ieListC :: PrintOpts -> SrcSpan -> [LIE GhcPs] -> SDoc
+ieListC o sp ies = vecC o sp (map (withMark ie) ies)
+
+-- | Where a module's export list can have comments: from its name to its
+-- first import or declaration.
+exportsRegion :: HsModule GhcPs -> SrcSpan
+exportsRegion m = case hsmodName m of
+  Just (L l _) -> case (map getLocA (hsmodImports m) ++ map getLocA (hsmodDecls m)) of
+    (next : _) | RealSrcSpan a _ <- locA l, RealSrcSpan b _ <- next ->
+      RealSrcSpan (mkRealSrcSpan (realSrcSpanEnd a) (realSrcSpanStart b)) Strict.Nothing
+    _ -> locA l `combineSrcSpans` lastIE
+  Nothing -> noSrcSpan
+  where
+    lastIE = maybe noSrcSpan (foldr (combineSrcSpans . getLocA) noSrcSpan) (hsmodExports m)
 
 ie :: IE GhcPs -> SDoc
 ie = \case
@@ -438,7 +496,7 @@ tyClDecl o ctx = \case
   ClassDecl _ mods mctx n tvs fix fds decls ->
     modified o mods $ formV (text "class" <+> withCtx o mctx (declHead o n tvs fix)
                               <+> fundeps fds)
-      (map (decl o ClassCtx . unLoc) decls)
+      (map (withMark (decl o ClassCtx)) decls)
   where
     fundeps [] = empty
     fundeps fds = form (text "|") [ parens (hsep (map lname l) <+> text "->" <+> hsep (map lname r))
@@ -456,7 +514,7 @@ withCtx o (Just (L _ (HsContext _ cs))) d = form (text "=>") (map (typ o TCtxEle
 
 dataDefn :: PrintOpts -> SDoc -> SDoc -> HsDataDefn GhcPs -> SDoc
 dataDefn o kw hd (HsDataDefn _ mctx mctype mkind cons derivs) =
-  formV (kw <+> ctypeDoc <+> withCtx o mctx hd') (consDocs ++ map (derivClause o . unLoc) derivs)
+  formV (kw <+> ctypeDoc <+> withCtx o mctx hd') (consDocs ++ map (withMark (derivClause o)) derivs)
   where
     hd' = case mkind of
       Nothing -> hd
@@ -470,8 +528,8 @@ dataDefn o kw hd (HsDataDefn _ mctx mctype mkind cons derivs) =
       NewTypeCon c -> [c]
       DataTypeCons _ cs -> cs
     consDocs = case conList of
-      cs@(L _ ConDeclGADT{} : _) -> [formV (text "where") (map (conDecl o . unLoc) cs)]
-      cs -> map (conDecl o . unLoc) cs
+      cs@(L _ ConDeclGADT{} : _) -> [formV (text "where") (map (withMark (conDecl o)) cs)]
+      cs -> map (withMark (conDecl o)) cs
 
 derivClause :: PrintOpts -> HsDerivingClause GhcPs -> SDoc
 derivClause o (HsDerivingClause _ mstrat (L _ tys)) = form (text "deriving") $
@@ -488,15 +546,17 @@ derivClause o (HsDerivingClause _ mstrat (L _ tys)) = form (text "deriving") $
       Just (ViaStrategy (XViaStrategyPs _ t)) -> ([], [text "via", sigType o t])
 
 conDecl :: PrintOpts -> ConDecl GhcPs -> SDoc
-conDecl o = \case
-  ConDeclH98 _ mods n hasForall exTvs mctx args _ ->
-    modified o mods $
+conDecl o0 = \case
+  c@(ConDeclH98 _ mods n hasForall exTvs mctx args _) ->
+    let o = o0 { prVertical = hasComments o0 (conSpan c) }
+        form = if prVertical o then \h as -> parens (hang h 2 (vcat as)) else GHC.Parser.Lisp.Printer.form
+    in modified o mods $
       let core = case args of
             PrefixCon _ [] -> lname n
             PrefixCon _ fs -> form (headName (unLoc n)) (map (conField o TArg) fs)
             InfixCon _ l r -> form (text ":infix") [conField o TOperand l, lname n, conField o TOperand r]
             RecCon _ (L _ []) -> form (text ":rec") [lname n]
-            RecCon _ (L _ flds) -> form (headName (unLoc n)) (map (recField o . unLoc) flds)
+            RecCon _ (L _ flds) -> form (headName (unLoc n)) (map (withMark (recField o)) flds)
           withC = withCtx o mctx core
       in if hasForall
            then form (text "forall") (map (tyVarBndr o specFlag . unLoc) exTvs ++ [withC])
@@ -504,10 +564,11 @@ conDecl o = \case
   ConDeclGADT _ mods names (L _ outer) inner mctx args res _ ->
     modified o mods $ form (text "::") (map lname (toList names) ++ [ty])
     where
+      o = o0
       argsDocs = case args of
         PrefixConGADT _ fs -> map (\f -> (Just (cdf_multiplicity f), conField o TArrowArg f)) fs
         RecConGADT _ (L _ flds) ->
-          [(Nothing, form (text ":record") (map (recField o . unLoc) flds))]
+          [(Nothing, form (text ":record") (map (withMark (recField o)) flds))]
       body = arrows o argsDocs (typ o TTop res)
       withC = withCtx o mctx body
       withInner = foldr (\(L _ tele) d -> case tele of
@@ -516,6 +577,15 @@ conDecl o = \case
       ty = case outer of
         HsOuterImplicit _ -> withInner
         HsOuterExplicit _ bndrs -> form (text "forall") (map (tyVarBndr o specFlag . unLoc) bndrs ++ [withInner])
+
+-- | The span of a constructor declaration's text.
+conSpan :: ConDecl GhcPs -> SrcSpan
+conSpan = \case
+  ConDeclH98 { con_name = n, con_args = args } -> case args of
+    PrefixCon _ fs -> foldr (combineSrcSpans . getLocA . cdf_type) (getLocA n) fs
+    InfixCon _ a b -> getLocA (cdf_type a) `combineSrcSpans` getLocA (cdf_type b)
+    RecCon _ (L l _) -> getLocA n `combineSrcSpans` locA l
+  _ -> noSrcSpan
 
 -- | An arrow chain from (arrow, argument) pairs and a result.
 arrows :: PrintOpts -> [(Maybe (HsModifiedFunArr GhcPs), SDoc)] -> SDoc -> SDoc
@@ -615,7 +685,7 @@ instDecl o ctx = \case
   ClsInstD _ (ClsInstDecl (mwarn, _) mods ty decls moverlap) ->
     modified o mods $ formV (text "instance" <+> maybe empty warningTxt mwarn
                               <+> overlap moverlap <+> sigType o ty)
-      (map (decl o InstCtx . unLoc) decls)
+      (map (withMark (decl o InstCtx)) decls)
   DataFamInstD _ (DataFamInstDecl (FamEqn _ n bndrs pats fix defn)) ->
     let kw = dataKeyword defn
         kw' = if ctx == InstCtx then kw else kw <+> text "instance"
@@ -651,7 +721,7 @@ derivDecl o (DerivDecl (mwarn, _) (HsWC _ ty) mstrat moverlap) =
 
 bind :: PrintOpts -> HsBind GhcPs -> SDoc
 bind o = \case
-  FunBind _ n (MG _ (L _ ms)) -> vcat (map (funEquation o n . unLoc) ms)
+  FunBind _ n (MG _ (L _ ms)) -> vcat (map (withMark (funEquation o n)) ms)
   PatBind _ p mods grhss ->
     form (text "=") (lhs : grhssDocs o grhss)
     where
@@ -697,7 +767,7 @@ grhssDocs o (GRHSs _ grhss binds) = rhs ++ whereDoc o binds
   where
     rhs = case grhss of
       L _ (GRHS _ [] e) :| [] -> [expr o ETop e]
-      _ -> map (grhs o (expr o ETop) . unLoc) (toList grhss)
+      _ -> map (withMark (grhs o (expr o ETop))) (toList grhss)
 
 grhs :: PrintOpts -> (body -> SDoc) -> GRHS GhcPs body -> SDoc
 grhs o bodyDoc (GRHS _ guards body) = form (text "|") (map (stmt o . unLoc) guards ++ [bodyDoc body])
@@ -716,8 +786,8 @@ localBinds o = \case
   EmptyLocalBinds _ -> []
   where
     valBind = \case
-      VbBind (L _ b) -> bind o b
-      VbSig (L _ s) -> sig o LocalCtx s
+      VbBind b -> withMark (bind o) b
+      VbSig s -> withMark (sig o LocalCtx) s
 
 patSynBind :: PrintOpts -> PatSynBind GhcPs GhcPs -> SDoc
 patSynBind o (PSB _ n details def dir) = form (text "pattern") $
@@ -802,11 +872,13 @@ forallTele o tele body = case tele of
 
 -- | A type at a position: implicit parentheses per SPEC I5.
 typ :: PrintOpts -> TPos -> LHsType GhcPs -> SDoc
-typ o pos (L _ t) = case t of
+typ o0 pos lt@(L l t) = markL lt <> case t of
   HsParTy _ (L _ inner)
     | typeNeedsParens pos inner -> typeForm o inner
     | otherwise -> form (text ":paren") [typ o TParen (L noSrcSpanA inner)]
   _ -> typeForm o t
+  where
+    o = o0 { prVertical = hasComments o0 (locA l) }
 
 typeForm :: PrintOpts -> HsType GhcPs -> SDoc
 typeForm o = \case
@@ -819,7 +891,8 @@ typeForm o = \case
   t@(HsFunTy _ arr _ _) ->
     let (args, res) = funChain t
     in if all isPlainArr (map fst args)
-         then form (text "->") (map (typ o TArrowArg . snd) args ++ [typ o TTop res])
+         then (if prVertical o then formV (text "->") else form (text "->"))
+                (map (typ o TArrowArg . snd) args ++ [typ o TTop res])
          else case t of
            HsFunTy _ _ a r -> form (arrowHead arr) [arrowArg o arr (typ o TArrowArg a), typ o TTop r]
            _ -> empty
@@ -852,7 +925,7 @@ typeForm o = \case
           SrcNoUnpack -> form (text ":nounpack") [d]
           NoSrcUnpack -> d
     in unpackDoc (bangDoc (typ o TArg t))
-  XHsType (HsRecTy _ (L _ flds)) -> form (text ":record") (map (recField o . unLoc) flds)
+  XHsType (HsRecTy _ (L _ flds)) -> form (text ":record") (map (withMark (recField o)) flds)
   XHsType (HsCoreTy _) -> todo "HsCoreTy"
   where
     startsWithTick = \case
@@ -922,7 +995,7 @@ interleave [] ys = ys
 
 -- | An expression at a position: implicit parentheses per SPEC I5.
 expr :: PrintOpts -> EPos -> LHsExpr GhcPs -> SDoc
-expr o pos (L _ e) = case e of
+expr o pos le@(L _ e) = markL le <> case e of
   HsPar _ (L _ inner)
     | exprNeedsParens (prParens o) pos inner -> exprForm o inner
     | otherwise -> form (text ":paren") [expr o EParen (L noSrcSpanA inner)]
@@ -941,8 +1014,8 @@ exprForm o = \case
       [L _ (Match _ _ (L _ ps) (GRHSs _ (L _ (GRHS _ [] body) :| []) _))] ->
         form (text "\\") (map (pat o PArg) ps ++ [expr o ETop body])
       _ -> todo "HsLam"
-    LamCase -> formV (text "\\case") (map (alt o (expr o ETop) . unLoc) ms)
-    LamCases -> formV (text "\\cases") (map (alt o (expr o ETop) . unLoc) ms)
+    LamCase -> formV (text "\\case") (map (withMark (alt o (expr o ETop))) ms)
+    LamCases -> formV (text "\\cases") (map (withMark (alt o (expr o ETop))) ms)
   e@HsApp{} -> app o e
   e@HsAppType{} -> app o e
   e@OpApp{} -> opChain o e
@@ -955,9 +1028,9 @@ exprForm o = \case
   ExplicitSum _ tag width e ->
     form (text ":usum") (replicate (tag - 1) (text ":_") ++ [expr o ETop e] ++ replicate (width - tag) (text ":_"))
   HsCase _ scrut (MG _ (L _ ms)) ->
-    formV (text "case" <+> expr o ETop scrut) (map (alt o (expr o ETop) . unLoc) ms)
+    formV (text "case" <+> expr o ETop scrut) (map (withMark (alt o (expr o ETop))) ms)
   HsIf _ c t e -> form (text "if") [expr o ETop c, expr o ETop t, expr o ETop e]
-  HsMultiIf _ grhss -> formV (text "if") (map (grhs o (expr o ETop) . unLoc) (toList grhss))
+  HsMultiIf _ grhss -> formV (text "if") (map (withMark (grhs o (expr o ETop))) (toList grhss))
   HsLet _ binds body -> formV (text "let") (localBinds o binds ++ [expr o ETop body])
   HsDo _ flav (L _ stmts) -> doExpr o flav stmts
   ExplicitList _ es -> vec (map (expr o ETop) es)
@@ -1099,8 +1172,8 @@ alt o bodyDoc (Match _ _ (L _ ps) (GRHSs _ grhss binds)) =
 
 doExpr :: PrintOpts -> HsDoFlavour -> [ExprLStmt GhcPs] -> SDoc
 doExpr o flav stmts = case flav of
-  DoExpr mm -> formV (qual mm (text "do")) (map (stmt o . unLoc) stmts)
-  MDoExpr mm -> formV (qual mm (text "mdo")) (map (stmt o . unLoc) stmts)
+  DoExpr mm -> formV (qual mm (text "do")) (map (withMark (stmt o)) stmts)
+  MDoExpr mm -> formV (qual mm (text "mdo")) (map (withMark (stmt o)) stmts)
   ListComp -> comprehension
   MonadComp -> comprehension
   GhciStmtCtxt -> todo "GhciStmtCtxt"
@@ -1137,7 +1210,7 @@ stmt o = \case
 -- Patterns
 
 pat :: PrintOpts -> PPos -> LPat GhcPs -> SDoc
-pat o pos (L _ p) = case p of
+pat o pos lp@(L _ p) = markL lp <> case p of
   ParPat _ (L _ inner)
     | patNeedsParens (prParens o) pos inner -> patForm o inner
     | otherwise -> form (text ":paren") [pat o PParen (L noSrcSpanA inner)]
@@ -1220,10 +1293,10 @@ cmd o = \case
       [L _ (Match _ _ (L _ ps) (GRHSs _ (L _ (GRHS _ [] body) :| []) _))] ->
         form (text "\\") (map (pat o PArg) ps ++ [lcmd body])
       _ -> todo "HsCmdLam"
-    LamCase -> formV (text "\\case") (map (alt o lcmd . unLoc) ms)
-    LamCases -> formV (text "\\cases") (map (alt o lcmd . unLoc) ms)
+    LamCase -> formV (text "\\case") (map (withMark (alt o lcmd)) ms)
+    LamCases -> formV (text "\\cases") (map (withMark (alt o lcmd)) ms)
   HsCmdPar _ c -> form (text ":paren") [lcmd c]
-  HsCmdCase _ e (MG _ (L _ ms)) -> formV (text "case" <+> expr o ETop e) (map (alt o lcmd . unLoc) ms)
+  HsCmdCase _ e (MG _ (L _ ms)) -> formV (text "case" <+> expr o ETop e) (map (withMark (alt o lcmd)) ms)
   HsCmdIf _ _ c t e -> form (text "if") [expr o ETop c, lcmd t, lcmd e]
   HsCmdLet _ binds c -> formV (text "let") (localBinds o binds ++ [lcmd c])
   HsCmdDo _ (L _ stmts) -> formV (text "do") (map (cmdStmt . unLoc) stmts)
