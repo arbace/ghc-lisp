@@ -189,13 +189,13 @@ readForm opts st@(l0, _) = case peek st of
         (_, st3) = skipWs st2
     (_, st4) <- readForm opts st3
     pure (Nothing, st4)
-  Just '#' | peek2 st `elem` [Just '{', Just '#'] ->
-    reserved "#{ } sets and #tags are reserved"
+  Just '#' | peek2 st == Just '{' ->
+    reserved "#{ } sets are reserved"
   Just ':' | Just c2 <- peek2 st, isAlpha c2 || c2 == '_' -> do
     let (_, st1) = step st
         (name, st2) = spanSt (not . isDelim) st1
     pure (Just (Form (mkPsSpan l0 (fst st2)) (FKeyword (fsLit name))), st2)
-  Just '@' | Just c2 <- peek2 st, (not (isDelim c2) && not (isSymbolChar c2)) || c2 `elem` ("([" :: String) ->
+  Just '@' | Just c2 <- peek2 st, (not (isDelim c2) && not (isSymbolChar c2)) || c2 `elem` ("([\"" :: String) ->
     prefix PAt 1
   Just '\'' | peek2 st == Just '\'' -> prefix PTyQuote 2
   _ -> atom
@@ -220,7 +220,7 @@ readForm opts st@(l0, _) = case peek st of
     prefix p n = do
       let st1 = iterate (snd . step) st !! n
       case peek st1 of
-        Just c | not (isDelim c) || c `elem` ("([" :: String) -> pure ()
+        Just c | not (isDelim c) || c `elem` ("([\"" :: String) -> pure ()
         _ -> Left (mkPsSpan l0 (fst st1), "a prefix must be followed by a form")
       (mf, st2) <- readForm opts st1
       case mf of

@@ -113,6 +113,7 @@ import GHC.CoreToStg.Prep( corePrepExpr )
 import GHC.CoreToStg    ( coreToStg )
 
 import GHC.Parser.Errors.Types
+import GHC.Parser.Lisp (lispOrHaskell) -- ghc-lisp:
 import GHC.Parser
 import GHC.Parser.Lexer as Lexer
 
@@ -230,7 +231,7 @@ hscParse' mod_summary
                  = parseSignature
                  | otherwise = parseModule
 
-    case unP parseMod (initParserState (initParserOpts dflags) buf loc) of
+    case lispOrHaskell (ml_hs_file (ms_location mod_summary)) parseMod (initParserState (initParserOpts dflags) buf loc) of -- ghc-lisp:
         PFailed pst -> do
             handleWarningsThrowErrors (getPsMessages pst)
         POk pst rdr_module -> do

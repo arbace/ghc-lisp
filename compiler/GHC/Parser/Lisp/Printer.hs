@@ -14,6 +14,7 @@ module GHC.Parser.Lisp.Printer
 import GHC.Prelude
 
 import GHC.Hs hiding (patNeedsParens)
+import GHC.Core.DataCon (HsSrcBang(..))
 import GHC.Parser.Lisp.Parens
 import GHC.Types.Name
 import GHC.Types.Name.Reader
@@ -135,7 +136,7 @@ lname :: GenLocated l RdrName -> SDoc
 lname = rdr . unLoc
 
 isSymName :: RdrName -> Bool
-isSymName (Exact _) = False
+isSymName r@(Exact _) = occNameString (rdrNameOcc r) == ":"
 isSymName r = case occNameString (rdrNameOcc r) of
   c:_ -> not (isAlpha c || c == '_' || c == '(' || c == '[')
   _ -> False
@@ -421,7 +422,7 @@ tyClDecl :: PrintOpts -> DeclCtx -> TyClDecl GhcPs -> SDoc
 tyClDecl o ctx = \case
   FamDecl _ fd -> familyDecl o ctx fd
   SynDecl _ n tvs fix rhs ->
-    form (text "type") [declHead o n tvs fix, typ o TTop rhs]
+    form (text "type") [declHead o n tvs fix, typ o TParen rhs]
   DataDecl _ mods n tvs fix defn ->
     modified o mods $ dataDefn o (dataKeyword defn) (declHead o n tvs fix) defn
   ClassDecl _ mods mctx n tvs fix fds decls ->
@@ -501,7 +502,7 @@ conDecl o = \case
       withC = withCtx o mctx body
       withInner = foldr (\(L _ tele) d -> case tele of
                           HsGadtForAll _ t -> forallTele o t d
-                          HsGadtPar _ -> d) withC inner
+                          HsGadtPar _ -> form (text ":paren") [d]) withC inner
       ty = case outer of
         HsOuterImplicit _ -> withInner
         HsOuterExplicit _ bndrs -> form (text "forall") (map (tyVarBndr o specFlag . unLoc) bndrs ++ [withInner])
@@ -584,6 +585,7 @@ famEqn o rhsDoc (FamEqn _ n bndrs pats fix rhs) =
 famLhs :: PrintOpts -> LIdP GhcPs -> HsFamEqnPats GhcPs -> LexicalFixity -> SDoc
 famLhs o n pats fix = case (fix, valArgs) of
   (Infix, [l, r]) -> form (text ":infix") [l, lname n, r]
+  (Infix, l : r : rest) -> form (form (text ":infix") [l, lname n, r]) rest
   _ | null pats -> lname n
     | otherwise -> form (headName (unLoc n)) (map typeArg pats)
   where
@@ -641,7 +643,11 @@ bind :: PrintOpts -> HsBind GhcPs -> SDoc
 bind o = \case
   FunBind _ n (MG _ (L _ ms)) -> vcat (map (funEquation o n . unLoc) ms)
   PatBind _ p mods grhss ->
-    form (text "=") (modified o mods (pat o PTop p) : grhssDocs o grhss)
+    form (text "=") (lhs : grhssDocs o grhss)
+    where
+      lhs = case mods of
+        [] -> pat o PTop p
+        _ -> form (text ":mod") (map (modifier o) mods ++ [pat o PTop p])
   VarBind{} -> todo "VarBind"
   PatSynBind _ psb -> patSynBind o psb
 
@@ -826,7 +832,18 @@ typeForm o = \case
   HsExplicitTupleTy _ prom ts -> promoted prom (form (text ":tuple") (map (typ o TTop) ts))
   HsTyLit _ l -> hsLit l
   HsWildCardTy _ -> text "_"
-  XHsType _ -> todo "XHsType"
+  XHsType (HsBangTy _ (HsSrcBang _ unpack bang) t) ->
+    let bangDoc d = case bang of
+          SrcStrict -> form (text "!") [d]
+          SrcLazy -> form (text "~") [d]
+          NoSrcStrict -> d
+        unpackDoc d = case unpack of
+          SrcUnpack -> form (text ":unpack") [d]
+          SrcNoUnpack -> form (text ":nounpack") [d]
+          NoSrcUnpack -> d
+    in unpackDoc (bangDoc (typ o TArg t))
+  XHsType (HsRecTy _ (L _ flds)) -> form (text ":record") (map (recField o . unLoc) flds)
+  XHsType (HsCoreTy _) -> todo "HsCoreTy"
   where
     startsWithTick = \case
       HsTyVar _ IsPromoted _ -> True
@@ -849,13 +866,21 @@ typeApp o t = form hd (reverse args)
     (hd, args) = go t
     go = \case
       HsAppTy _ (L _ f) a -> let (h, as) = go' f in (h, typ o TArg a : as)
-      HsAppKindTy _ (L _ f) k -> let (h, as) = go' f in (h, (char '@' <> typ o TArg k) : as)
+      HsAppKindTy _ (L _ f) k -> let (h, as) = go' f in (h, typeArgDoc o k : as)
       other -> (typeForm o other, [])
     go' f = case f of
       HsAppTy{} -> go f
       HsAppKindTy{} -> go f
       HsTyVar _ NotPromoted (L _ n) | isSymName n -> (parens (text ":name" <+> rdr n), [])
+      HsTyVar _ IsPromoted (L _ n) | isSymName n -> (char '\'' <> parens (text ":name" <+> rdr n), [])
       _ -> (typ o TFun (L noSrcSpanA f), [])
+
+-- | A type argument @\@T@; an operator is written @\@(:name op)@ so that the
+-- reader doesn't take @\@op@ for one operator.
+typeArgDoc :: PrintOpts -> LHsType GhcPs -> SDoc
+typeArgDoc o t = char '@' <> case t of
+  L _ (HsTyVar _ NotPromoted (L _ n)) | isSymName n -> parens (text ":name" <+> rdr n)
+  _ -> typ o TArg t
 
 opTyChain :: PrintOpts -> HsType GhcPs -> SDoc
 opTyChain o t
@@ -896,7 +921,7 @@ expr o pos (L _ e) = case e of
 exprForm :: PrintOpts -> HsExpr GhcPs -> SDoc
 exprForm o = \case
   HsVar _ n -> lname n
-  HsOverLabel st l -> srcOr st (char '#' <> htext l)
+  HsOverLabel st l -> char '#' <> srcOr st (htext l)
   HsIPVar _ (HsIPName n) -> char '?' <> htext n
   HsOverLit _ ol -> overLit ol
   HsLit _ l -> hsLit l
@@ -942,7 +967,7 @@ exprForm o = \case
     PatBr _ p -> form (text ":quote-pat") [pat o PTop p]
     DecBrL _ ds -> formV (text ":quote-decls") (map (decl o TopCtx . unLoc) ds)
     DecBrG{} -> todo "DecBrG"
-    TypBr _ t -> form (text ":quote-type") [typ o TTop t]
+    TypBr _ t -> form (text ":quote-type") [typ o TParen t]
     VarBr _ isValue n -> (if isValue then char '\'' else text "''") <> lname n
   HsTypedSplice _ (HsTypedSpliceExpr _ e) -> form (text ":typed-splice") [expr o EAtom e]
   HsUntypedSplice _ sp -> untypedSplice o sp
@@ -972,9 +997,7 @@ exprForm o = \case
         [ fieldBind (fieldOcc (unLoc l)) r pun | L _ (HsFieldBind _ l r pun) <- flds ]
       OverloadedRecUpdFields _ flds ->
         [ fieldBind (path l) r pun | L _ (HsFieldBind _ (L _ l) r pun) <- flds ]
-    path (FieldLabelStrings fs) = case fs of
-      f :| [] -> dotField (unLoc f)
-      _ -> form (text ":get") (map (dotField . unLoc) (toList fs))
+    path (FieldLabelStrings fs) = form (text ":get") (map (dotField . unLoc) (toList fs))
     fieldBind l r pun
       | pun = l
       | otherwise = form (text "=") [l, expr o ETop r]
@@ -1026,7 +1049,7 @@ app o e0 = case spine e0 [] of
         n = length args
         argDoc i = \case
           Left a -> expr o (if i == n then EArgLast else EArg) a
-          Right t -> char '@' <> typ o TArg t
+          Right t -> typeArgDoc o t
 
 -- | An operator chain: @(op a b c)@ or @(:infix a op b op' c)@.
 opChain :: PrintOpts -> HsExpr GhcPs -> SDoc
@@ -1128,7 +1151,7 @@ patForm o = \case
     PrefixCon _ ps -> form (headName con) (map (pat o PArg) ps)
     RecCon _ flds -> form (text ":rec") (rdr con : recFields o (pat o PElem) flds)
     InfixCon{} -> conChain o p
-  ViewPat _ e p -> form (text "->") [expr o ETop e, pat o PTop p]
+  ViewPat _ e p -> form (text "->") [expr o ETop e, pat o PElem p]
   SplicePat _ sp -> untypedSplice o sp
   LitPat _ l -> hsLit l
   QualLitPat _ ql -> qualLit ql

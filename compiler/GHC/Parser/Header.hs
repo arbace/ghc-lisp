@@ -32,6 +32,7 @@ import GHC.Driver.Errors.Types -- Unfortunate, needed due to the fact we throw e
 
 import GHC.Parser.Errors.Types
 import GHC.Parser           ( parseHeader )
+import GHC.Parser.Lisp (isLispFile, lispOrHaskell, lispOptionsFromFile) -- ghc-lisp:
 import GHC.Parser.Lexer
 
 import GHC.Hs
@@ -88,7 +89,7 @@ parseHeaderImports dflags buf filename source_filename = do
   let loc  = mkRealSrcLoc (mkFastString filename) 1 1
       popts         = initParserOpts dflags
       sec           = initSourceErrorContext dflags
-  case unP parseHeader (initParserState popts buf loc) of
+  case lispOrHaskell (Just source_filename) parseHeader (initParserState popts buf loc) of -- ghc-lisp:
     PFailed pst ->
         -- assuming we're not logging warnings here as per below
       return $ Left $ getPsErrorMessages pst
@@ -208,6 +209,7 @@ getOptionsFromFile :: ParserOpts
                    -> [String] -- ^ Supported LANGUAGE pragmas
                    -> FilePath            -- ^ Input file
                    -> IO (Messages PsMessage, [Located String]) -- ^ Parsed options, if any.
+getOptionsFromFile opts _ _ filename | isLispFile filename = lispOptionsFromFile opts filename -- ghc-lisp:
 getOptionsFromFile opts sec supported filename
     = Exception.bracket
               (openBinaryFile filename ReadMode)

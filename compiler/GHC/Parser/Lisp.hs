@@ -14,6 +14,10 @@
 module GHC.Parser.Lisp
   ( parseLispModule
   , lispHeaderOptions
+    -- * Driver hooks
+  , isLispFile
+  , lispOrHaskell
+  , lispOptionsFromFile
   ) where
 
 import GHC.Prelude hiding (head)
@@ -54,7 +58,8 @@ import Language.Haskell.Syntax.Text (packHText)
 
 import Control.Monad
 import Data.Char (isUpper, isLower)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, isSuffixOf)
+import GHC.Data.Bag (listToBag)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe (isJust, fromMaybe)
@@ -92,6 +97,35 @@ lispHeaderOptions opts buf loc = case readForms opts buf loc of
                                , w <- words (unpackHTextS s) ]
       _ -> []
     unpackHTextS = unpackFS . mkFastStringShortText
+
+-------------------------------------------------------------------------------
+-- Driver hooks (each called from a one-line `ghc-lisp:` hook upstream)
+
+-- | Is this a ghc-lisp source file?
+isLispFile :: FilePath -> Bool
+isLispFile f = ".hsl" `isSuffixOf` f
+
+-- | Run GHC's parser, or the ghc-lisp parser for a @.hsl@ source file.
+-- Hook in "GHC.Driver.Main.Passes" (the module parse) and
+-- "GHC.Parser.Header" (the downsweep's header parse).
+lispOrHaskell :: Maybe FilePath -> P (Located (HsModule GhcPs)) -> PState
+              -> ParseResult (Located (HsModule GhcPs))
+lispOrHaskell (Just file) _ pst
+  | isLispFile file = parseLispModule (options pst) (buffer pst) (psRealLoc (loc pst))
+lispOrHaskell _ p pst = unP p pst
+
+-- | The header options of a @.hsl@ file, as 'getOptionsFromFile' returns
+-- them for Haskell files. CPP is not supported in @.hsl@ files (DESIGN.md
+-- D11).
+lispOptionsFromFile :: ParserOpts -> FilePath -> IO (Messages PsMessage, [Located String])
+lispOptionsFromFile opts file = do
+  buf <- hGetStringBuffer file
+  let os = lispHeaderOptions opts buf (mkRealSrcLoc (mkFastString file) 1 1)
+      cpp = [ o | o@(L _ "-XCPP") <- os ]
+      errs = [ mkPlainErrorMsgEnvelope sp $ PsUnknownMessage $ mkSimpleUnknownDiagnostic $
+                 mkPlainError noHints (text "CPP is not supported in .hsl files")
+             | L sp _ <- cpp ]
+  pure (mkMessages (listToBag errs), filter (\(L _ o) -> o /= "-XCPP") os)
 
 -------------------------------------------------------------------------------
 -- Errors and locations
@@ -183,6 +217,8 @@ tokSym = \case
   ITsignature -> varS "signature"
   ITdependency -> varS "dependency"
   ITrequires -> varS "requires"
+  ITsplice -> varS "splice"
+  ITquote -> varS "quote"
   _ -> Nothing
   where
     var s = Just (Sym Nothing s VarId)
@@ -445,7 +481,7 @@ ieP isExport f = case f of
     | Just ns <- namespaceOf h, [x] <- args, isDotDot x ->
         pure (at f (IEWholeNamespace (IEWholeNamespaceExt Nothing noAnn []) ns))
     | Just ns <- namespaceOf h, [Form _ (FList (n : subs))] <- args, all isDotDot subs, not (null subs) -> do
-        nm <- wrapped (Form (formPsSpan f) (FList [h, n]))
+        nm <- wrapped n
         pure (at f (IEThingAll (IEThingAllExt Nothing noAnn noAnn noAnn) ns nm Nothing))
   Form _ (FList [h, x]) | isWrapHead h, isJust (symOf x) -> plainItem
   Form _ (FList (n : subs)) | not (isNamespaceHead n) -> do
@@ -458,7 +494,8 @@ ieP isExport f = case f of
         items <- mapM wrapped (before ++ drop 1 after)
         let wc = if null after then NoIEWildcard else IEWildcard (length before)
         pure (at f (IEThingWith (Nothing, noAnn) nm wc items Nothing))
-  _ -> plainItem
+  _ | isDotDot f -> pure (at f (IEWholeNamespace (IEWholeNamespaceExt Nothing noAnn []) (NoNamespaceSpecifier noExtField)))
+    | otherwise -> plainItem
   where
     _ = isExport
     plainItem = do
@@ -466,7 +503,7 @@ ieP isExport f = case f of
       let isVar = case w of
             IEName _ (L _ r) -> isVarOcc (rdrNameOcc r)
             IEPattern{} -> True
-            IEDefault{} -> True
+            IEData _ (L _ r) -> isVarOcc (rdrNameOcc r)
             _ -> False
       pure (at f (if isVar then IEVar Nothing nm Nothing else IEThingAbs Nothing nm Nothing))
     isWrapHead h = isName "pattern" h || isTok (\case ITpattern -> True; ITtype -> True; ITdata -> True; ITdefault -> True; _ -> False) h
@@ -614,9 +651,11 @@ keywordDecl ctx f k args = case k of
       nm <- varName' n
       pure [sigD (SCCFunSig (noAnn, NoSourceText) nm (Just (at l (StringLiteral st s))))]
     _ -> failAt f "malformed :scc"
-  _ -> failAt f ("unknown declaration form :" ++ k)
+  _ | ctx == TopCtx -> do
+        e <- expr ETop f
+        pure [at f (SpliceD noExtField (SpliceDecl noExtField (at f (HsUntypedSpliceExpr noAnn e)) BareSplice))]
+    | otherwise -> failAt f ("unknown declaration form :" ++ k)
   where
-    _ = ctx
     sigD s = at f (SigD noExtField s)
     warnDecl = do
       -- (:deprecated ns? names... msg), (:warning in? "cat"? ns? names... msg)
@@ -767,6 +806,12 @@ bindDecl ctx f = \case
 
 -- | A binding: function equation or pattern binding (SPEC §3.1).
 binding :: DeclCtx -> Form -> Form -> [Form] -> P (HsBind GhcPs)
+binding _ f lhs rhsForms
+  | Just items@(_ : _ : _) <- kwForm "mod" lhs = do
+      grhss <- rhsP f rhsForms
+      mods <- mapM modifierP (init items)
+      p <- pat PTop (last items)
+      pure (PatBind noExtField p mods grhss)
 binding _ f lhs rhsForms = do
   grhss <- rhsP f rhsForms
   case lhsShape lhs of
@@ -1170,7 +1215,7 @@ typeDecl ctx f args = case args of
         pure [L l (InstD noExtField d)]
     | otherwise -> do
         lhs <- typ TTop hd
-        r <- typ TTop rhs
+        r <- typ TParen rhs
         L l d <- mkTySynonym (formSpan f) lhs r noAnn noAnn
         pure [L l (TyClD noExtField d)]
   _ -> failAt f "malformed type declaration"
@@ -1558,7 +1603,9 @@ exprForm f = case formNode f of
   FPrefix PTyQuote x -> at f . HsUntypedBracket noExtField . VarBr noAnn False <$> nameAt NSType x
   FPrefix PAt _ -> failAt f "a type argument must follow a function"
   FKeyword _ -> failAt f "unexpected keyword in an expression"
-  FList [h] | isTok (\case ITlcase -> True; _ -> False) h -> lamCase f LamCase []
+  FList [h] | HTok (ITdo mm) <- headOf h -> doBlock f (DoExpr (fmap mkModuleNameFS mm)) []
+            | HTok (ITmdo mm) <- headOf h -> doBlock f (MDoExpr (fmap mkModuleNameFS mm)) []
+            | isTok (\case ITlcase -> True; _ -> False) h -> lamCase f LamCase []
             | isTok (\case ITlcases -> True; _ -> False) h -> lamCase f LamCases []
             | isKw "tuple" h -> pure (at f (ExplicitTuple noAnn [] Boxed))
             | isKw "utuple" h -> pure (at f (ExplicitTuple noAnn [] Unboxed))
@@ -1718,7 +1765,7 @@ altP = altP' CaseAlt
 altP' :: LBody body => HsMatchContext (LIdP GhcPs) -> (EPos -> Form -> P (LocatedA (body GhcPs))) -> Form
       -> P (LMatch GhcPs (LocatedA (body GhcPs)))
 altP' ctxt bodyP f = case tokForm (\case ITrarrow _ -> True; _ -> False) f of
-  Just items@(_ : _ : _) -> do
+  Just items@(_ : _) -> do
     let (body0, whereF) = case reverse items of
           (w : r) | Just ws <- tokForm (\case ITwhere -> True; _ -> False) w -> (reverse r, Just ws)
           _ -> (items, Nothing)
@@ -1830,7 +1877,7 @@ keywordExpr f k args = case k of
     pure (at f (HsProjection noAnn (NE.fromList lbls)))
   "quote" | [e] <- args -> at f . HsUntypedBracket noExtField . ExpBr noAnn <$> expr ETop e
   "quote-pat" | [p] <- args -> at f . HsUntypedBracket noExtField . PatBr noAnn <$> pat PTop p
-  "quote-type" | [t] <- args -> at f . HsUntypedBracket noExtField . TypBr noAnn <$> typ TTop t
+  "quote-type" | [t] <- args -> at f . HsUntypedBracket noExtField . TypBr noAnn <$> typ TParen t
   "quote-decls" -> do
     ds <- concat <$> mapM (topDecl TopCtx) args
     pure (at f (HsUntypedBracket noExtField (DecBrL noAnn (cvTopDecls (toOL ds)))))
@@ -1964,6 +2011,23 @@ recFieldsP' argP punRhs flds = do
   pure (HsRecFields noAnn binds (fmap (\d -> at d (RecFieldsDotDot (length binds))) dd))
 
 recUpdP :: [Form] -> P (LHsRecUpdFields GhcPs)
+recUpdP flds
+  | any isPath flds = do
+      binds <- forM flds $ \x -> case tokForm (\case ITequal -> True; _ -> False) x of
+        Just [l, r] -> do
+          lbls <- pathOf l
+          v <- expr ETop r
+          pure (at x (HsFieldBind noAnn (at l (FieldLabelStrings lbls)) v False))
+        _ -> do
+          lbls <- pathOf x
+          v <- expr ETop (last (fromMaybe [x] (kwForm "get" x)))
+          pure (at x (HsFieldBind noAnn (at x (FieldLabelStrings lbls)) v True))
+      pure (OverloadedRecUpdFields noExtField binds)
+  where
+    isPath x = isJust (kwForm "get" x) || maybe False (\case [l, _] -> isJust (kwForm "get" l); _ -> False) (tokForm (\case ITequal -> True; _ -> False) x)
+    pathOf x = case kwForm "get" x of
+      Just ls@(_ : _) -> NE.fromList <$> mapM (\l -> do { lbl <- fieldLabel l; pure (at l (DotFieldOcc noAnn (at l lbl))) }) ls
+      _ -> failAt x "expected (:get field...)"
 recUpdP flds = do
   binds <- forM flds $ \x -> case tokForm (\case ITequal -> True; _ -> False) x of
     Just [l, r] -> do
@@ -2024,7 +2088,7 @@ patForm f = case formNode f of
           pure (at f (ConPat noExtField con (RecCon noAnn fs)))
       | isRArrow h, [e, p] <- args -> do
           e' <- expr ETop e
-          p' <- pat PTop p
+          p' <- pat PElem p
           pure (at f (ViewPat noAnn e' p'))
       | isDcolon h, [p, t] <- args -> do
           p' <- pat PSigSubj p
@@ -2104,18 +2168,18 @@ cmd f = case f of
     HTok ITlam | (_ : _ : _) <- args -> do
       ps <- mapM (pat PArg) (init args)
       body <- lcmd (last args)
-      let m = at f (Match noExtField (ArrowMatchCtxt (ArrowLamAlt LamSingle)) (at f ps)
+      let m = at f (Match noExtField (LamAlt LamSingle) (at f ps)
                     (GRHSs emptyComments (at f (GRHS noAnn [] body) :| []) (EmptyLocalBinds noExtField)))
       pure (HsCmdLam noAnn LamSingle (mkMatchGroup FromSource noAnn (at f [m])))
     HTok ITlcase -> do
-      ms <- mapM (altP' (ArrowMatchCtxt (ArrowLamAlt LamCase)) (const lcmd)) args
+      ms <- mapM (altP' (LamAlt LamCase) (const lcmd)) args
       pure (HsCmdLam noAnn LamCase (mkMatchGroup FromSource noAnn (at f ms)))
     HTok ITlcases -> do
-      ms <- mapM (altP' (ArrowMatchCtxt (ArrowLamAlt LamCases)) (const lcmd)) args
+      ms <- mapM (altP' (LamAlt LamCases) (const lcmd)) args
       pure (HsCmdLam noAnn LamCases (mkMatchGroup FromSource noAnn (at f ms)))
     HTok ITcase | (s : alts) <- args -> do
       scrut <- expr ETop s
-      ms <- mapM (altP' (ArrowMatchCtxt ArrowCaseAlt) (const lcmd)) alts
+      ms <- mapM (altP' CaseAlt (const lcmd)) alts
       pure (HsCmdCase noAnn scrut (mkMatchGroup FromSource noAnn (at f ms)))
     HTok ITif | [c, t, e] <- args -> HsCmdIf noAnn noSyntaxExpr <$> expr ETop c <*> lcmd t <*> lcmd e
     HTok ITlet | not (null args) -> HsCmdLet noAnn <$> localBindsP (init args) <*> lcmd (last args)
@@ -2133,7 +2197,9 @@ cmd f = case f of
           tops <- mapM (\c -> at c . HsCmdTop noExtField <$> lcmd c) [l, r]
           pure (HsCmdArrForm noAnn o Infix tops)
     _ | (_ : _) <- args -> do
-          c <- lcmd (Form (formPsSpan f) (FList (h : init args)))
+          c <- case init args of
+            [] -> lcmd h
+            more -> lcmd (Form (formPsSpan f) (FList (h : more)))
           e <- expr EArgLast (last args)
           pure (HsCmdApp noExtField c e)
     _ -> failAt f "unexpected command"

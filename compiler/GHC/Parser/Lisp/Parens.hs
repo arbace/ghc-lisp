@@ -156,18 +156,9 @@ overLitLevel opts ol = case ol_val ol of
   HsFractional fl | fl_neg fl -> negLevel opts
   _ -> 4
 
+-- | Literals are atoms; a negative primitive literal (@-4#@) is one token.
 litLevel :: ParenOpts -> HsLit GhcPs -> Int
-litLevel opts l = case l of
-  HsIntPrim (SourceText t) _ | negText t -> negLevel opts
-  HsInt8Prim (SourceText t) _ | negText t -> negLevel opts
-  HsInt16Prim (SourceText t) _ | negText t -> negLevel opts
-  HsInt32Prim (SourceText t) _ | negText t -> negLevel opts
-  HsInt64Prim (SourceText t) _ | negText t -> negLevel opts
-  HsFloatPrim _ fl | fl_neg fl -> negLevel opts
-  HsDoublePrim _ fl | fl_neg fl -> negLevel opts
-  _ -> 4
-  where
-    negText t = take 1 (unpackFS t) == "-"
+litLevel _ _ = 4
 
 -- | A negative literal binds like an atom under NegativeLiterals.
 negLevel :: ParenOpts -> Int

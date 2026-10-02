@@ -186,6 +186,17 @@ astDump = unlines . go 0
     go :: forall b. Data b => Int -> b -> [String]
     go d x
       | isAnnotation x = []
+      -- lists are flat, so that long lists don't nest (and indent) deeply
+      | showConstr (toConstr x) == "(:)" =
+          (replicate d ' ' ++ "[") : listElems (d + 1) x
+      | otherwise = go' d x
+    listElems :: forall b. Data b => Int -> b -> [String]
+    listElems d x = case showConstr (toConstr x) of
+      "(:)" -> concat (gmapQi 0 (go d) x : [gmapQi 1 (listElems d) x])
+      _ -> []
+    go' :: forall b. Data b => Int -> b -> [String]
+    go' d x
+      | isAnnotation x = []
       | Just (s :: String) <- cast x = leaf (show s)
       | Just (fs :: FastString) <- cast x = leaf (show (unpackFS fs))
       | Just (t :: HText) <- cast x = leaf (show (unpackHText t))

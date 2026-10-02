@@ -182,6 +182,7 @@ startPhase "lhs"      = Unlit HsSrcFile
 startPhase "lhs-boot" = Unlit HsBootFile
 startPhase "lhsig"    = Unlit HsigFile
 startPhase "hs"       = Cpp   HsSrcFile
+startPhase "hsl"      = Cpp   HsSrcFile -- ghc-lisp: .hsl sources
 startPhase "hs-boot"  = Cpp   HsBootFile
 startPhase "hsig"     = Cpp   HsigFile
 startPhase "hscpp"    = HsPp  HsSrcFile
@@ -252,6 +253,7 @@ js_suffixes                  = [ "js" ]
 -- Will not be deleted as temp files:
 haskellish_user_src_suffixes =
   haskellish_sig_suffixes ++ haskellish_boot_suffixes ++ [ "hs", "lhs" ]
+    ++ [ "hsl" ] -- ghc-lisp: .hsl sources
 haskellish_boot_suffixes     = [ "hs-boot", "lhs-boot" ]
 haskellish_sig_suffixes      = [ "hsig", "lhsig" ]
 backpackish_suffixes         = [ "bkp" ]

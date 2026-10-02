@@ -673,6 +673,7 @@ findInstalledHomeModule fc fopts home_unit mod_name = do
      source_exts =
       [ (os "hs",    mkHomeModLocationSearched fopts mod_name $ os "hs")
       , (os "lhs",   mkHomeModLocationSearched fopts mod_name $ os "lhs")
+      , (os "hsl",   mkHomeModLocationSearched fopts mod_name $ os "hsl") -- ghc-lisp:
       , (os "hsig",  mkHomeModLocationSearched fopts mod_name $ os "hsig")
       , (os "lhsig", mkHomeModLocationSearched fopts mod_name $ os "lhsig")
       ]
