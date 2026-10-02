@@ -28,3 +28,8 @@ test('lisp008', [extra_files(['lisp006.hs'])], run_command,
 
 # GHCi loads .hsl modules.
 test('lisp009', [extra_files(['lisp009.hsl'])], ghci_script, ['lisp009.script'])
+
+# Vim support (ghclisp/vim): gg=G keeps the printer's layout, and tokens are
+# highlighted. Prints nothing if all is well or if vim isn't installed.
+test('lisp010', [extra_files(['lisp006.hs', 'lisp001.hsl'])], run_command,
+     ['QUIET=1 sh {top}/../ghclisp/vim/test.sh {compiler} lisp006.hs'])
