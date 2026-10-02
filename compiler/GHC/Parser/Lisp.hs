@@ -165,6 +165,13 @@ at f = L (noAnnSrcSpan (formSpan f))
 atSpan :: NoAnn ann => SrcSpan -> a -> GenLocated (EpAnn ann) a
 atSpan sp = L (noAnnSrcSpan sp)
 
+-- | A context is located at its constraints, as in GHC (Haddock comments
+-- after the context belong to the type, not to the context); an empty
+-- context at the => head.
+ctxAt :: NoAnn ann => Form -> [Form] -> a -> GenLocated (EpAnn ann) a
+ctxAt hd [] = at hd
+ctxAt _ cs = atSpan (spanOf cs)
+
 spanOf :: [Form] -> SrcSpan
 spanOf [] = noSrcSpan
 spanOf (x : xs) = foldl combineSrcSpans (formSpan x) (map formSpan xs)
@@ -1028,7 +1035,7 @@ headWithCtx :: Form -> P (Maybe (LHsContext GhcPs), Form)
 headWithCtx f = case tokForm (\case ITdarrow _ -> True; _ -> False) f of
   Just args@(_ : _) -> do
     cs <- mapM (typ TCtxElem) (init args)
-    pure (Just (at f (HsContext noAnn cs)), last args)
+    pure (Just (ctxAt f (init args) (HsContext noAnn cs)), last args)
   _ -> pure (Nothing, f)
 
 -- | A head type: @(:: head K)@ splits into the head and a kind signature.
@@ -1127,7 +1134,7 @@ h98Con f = case f of
     | isTok (\case ITdarrow _ -> True; _ -> False) h, not (null args) -> do
         cs <- mapM (typ TCtxElem) (init args)
         L _ c <- h98Con (last args)
-        pure (at f c { con_mb_cxt = Just (at f (HsContext noAnn cs)) })
+        pure (at f c { con_mb_cxt = Just (ctxAt h (init args) (HsContext noAnn cs)) })
     | isKw "mod" h, not (null args) -> do
         mods <- mapM modifierP (init args)
         L _ c <- h98Con (last args)
@@ -1464,7 +1471,7 @@ typeForm f = case formNode f of
       | isTok (\case ITdarrow _ -> True; _ -> False) h -> do
           cs <- mapM (typ TCtxElem) (init args)
           body <- typ TTop (last args)
-          pure (at f (HsQualTy noExtField (at f (HsContext noAnn cs)) body))
+          pure (at f (HsQualTy noExtField (ctxAt h (init args) (HsContext noAnn cs)) body))
       | isRArrow h -> arrowChain f (HsStandardArr (EpArrow noAnn)) args
       | isTok (\case ITlolly -> True; _ -> False) h -> arrowChain f (HsLinearArr noAnn) args
       | isLinearArrowSym h -> arrowChain f (HsLinearArr noAnn) args
@@ -1693,7 +1700,7 @@ exprForm f = case formNode f of
     HTok (ITdarrow _) | not (null args) -> do
       cs <- mapM (expr ETop) (init args)
       body <- expr ETop (last args)
-      pure (at f (HsQual noExtField (at f (HsContext noAnn cs)) body))
+      pure (at f (HsQual noExtField (ctxAt h (init args) (HsContext noAnn cs)) body))
     HTok (ITrarrow _) | [a, b] <- args -> do
       -- type syntax in a term (RequiredTypeArguments): * is HsStar here
       let operand x

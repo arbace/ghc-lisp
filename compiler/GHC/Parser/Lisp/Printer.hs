@@ -533,12 +533,12 @@ dataDefn o kw hd (HsDataDefn _ mctx mctype mkind cons derivs) =
       cs -> map (withMark (conDecl o)) cs
 
 derivClause :: PrintOpts -> HsDerivingClause GhcPs -> SDoc
-derivClause o (HsDerivingClause _ mstrat (L _ tys)) = form (text "deriving") $
+derivClause o (HsDerivingClause _ mstrat (L l tys)) = form (text "deriving") $
   pre ++ [clauseTys] ++ post
   where
     clauseTys = case tys of
       DctSingle _ t -> sigType o t
-      DctMulti _ ts -> vec (map (sigType o) ts)
+      DctMulti _ ts -> vecC o (locA l) (map (withMark (sigTypeBody o)) ts)
     (pre, post) = case fmap unLoc mstrat of
       Nothing -> ([], [])
       Just (StockStrategy _) -> ([text "stock"], [])
@@ -863,6 +863,9 @@ sig o ctx = \case
 
 sigType :: PrintOpts -> LHsSigType GhcPs -> SDoc
 sigType o = sigTypeAt o TTop
+
+sigTypeBody :: PrintOpts -> HsSigType GhcPs -> SDoc
+sigTypeBody o t = sigType o (L noSrcSpanA t)
 
 sigTypeAt :: PrintOpts -> TPos -> LHsSigType GhcPs -> SDoc
 sigTypeAt o pos (L _ (HsSig _ outer body)) = case outer of
