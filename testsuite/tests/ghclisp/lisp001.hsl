@@ -1,0 +1,42 @@
+;; A whole program in ghc-lisp: equations, guards, where, a do block,
+;; a list comprehension, sections, records and a type class.
+(module Main [main])
+
+(import Data.List [sortBy])
+(import Data.Ord [comparing (Down ..)])
+(import qualified Data.Map.Strict as M)
+
+(data Shape
+   (Circle Double)
+   (Rect (:: w h Double))
+   (deriving [Show Eq]))
+
+(class (Area a)
+   (:: area (-> a Double)))
+
+(instance (Area Shape)
+   (= (area (Circle r)) (* pi r r))
+   (= (area (Rect w h)) (* w h)))
+
+(:: fact (-> Integer Integer))
+(= (fact 0) 1)
+(= (fact n) (* n (fact (- n 1))))
+
+(:: classify (-> Int String))
+(= (classify n)
+   (| (< n 0) "negative")
+   (| (== n 0) "zero")
+   (| otherwise big)
+   (where (= big "positive")))
+
+(:: main (IO ()))
+(= main
+   (do (print (map fact [1 .. 10]))
+       (print (sortBy (comparing Down) [3 1 2]))
+       (mapM_ (. putStrLn classify) [-1 0 1])
+       (let (= squares [(:tuple x (* x x)) | (<- x [1 .. 5]) (odd x)]))
+       (print squares)
+       (print (map (:section-r - 1) [10 20]))
+       (print (map area [(Circle 1) (:rec Rect (= w 2) (= h 3))]))
+       (print (M.toList (M.fromListWith + [(:tuple "a" 1) (:tuple "b" 2) (:tuple "a" 3)])))
+       (print (:update (Rect 1 1) (= h 5)))))

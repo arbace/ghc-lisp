@@ -1,0 +1,7 @@
+[1 of 2] Compiling Main             ( lisp003.hsl, lisp003.o )
+lisp003.hsl:5:24: error: [GHC-83865]
+    • Couldn't match expected type ‘[Char]’ with actual type ‘Bool’
+    • In the second argument of ‘(+)’, namely ‘True’
+      In the first argument of ‘putStrLn’, namely ‘(1 + True)’
+      In the expression: putStrLn (1 + True)
+

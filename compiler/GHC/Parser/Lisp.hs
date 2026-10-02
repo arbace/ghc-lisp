@@ -54,12 +54,11 @@ import GHC.Hs.DocString (HsDocStringDecorator(..))
 import Language.Haskell.Syntax.Decls.Overlap
 import Language.Haskell.Syntax.Specificity
 import Language.Haskell.Syntax.BooleanFormula
-import Language.Haskell.Syntax.Text (packHText)
+import Language.Haskell.Syntax.Text (packHText, unpackHText)
 
 import Control.Monad
 import Data.Char (isUpper, isLower)
 import Data.List (isPrefixOf, isSuffixOf)
-import GHC.Data.Bag (listToBag)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe (isJust, fromMaybe)
@@ -119,11 +118,8 @@ lispOptionsFromFile :: ParserOpts -> FilePath -> IO (Messages PsMessage, [Locate
 lispOptionsFromFile opts file = do
   buf <- hGetStringBuffer file
   let os = lispHeaderOptions opts buf (mkRealSrcLoc (mkFastString file) 1 1)
-      cpp = [ o | o@(L _ f) <- os, f `elem` ["-XCPP", "-cpp"] ]
-      errs = [ mkPlainErrorMsgEnvelope sp $ PsUnknownMessage $ mkSimpleUnknownDiagnostic $
-                 mkPlainError noHints (text "CPP is not supported in .hsl files")
-             | L sp _ <- cpp ]
-  pure (mkMessages (listToBag errs), filter (\(L _ o) -> o `notElem` ["-XCPP", "-cpp"]) os)
+  -- CPP is left out here and reported by the parser (moduleP).
+  pure (emptyMessages, filter (\(L _ o) -> o `notElem` ["-XCPP", "-cpp"]) os)
 
 -------------------------------------------------------------------------------
 -- Errors and locations
@@ -363,6 +359,9 @@ conName' = nameAt
 moduleP :: [Form] -> P (Located (HsModule GhcPs))
 moduleP forms0 = do
   let forms1 = dropWhile isHeaderPragma forms0
+  forM_ (takeWhile isHeaderPragma forms0) $ \h -> forM_ (fromMaybe [] (listOf h)) $ \x ->
+    when (isName "CPP" x || isTok (\case ITstring _ _ s -> "-cpp" `elem` words (unpackHText s); _ -> False) x) $
+      failAt x "CPP is not supported in .hsl files"
   (name, warn, exports, rest) <- case forms1 of
     (f : fs) | Just args <- tokForm (\case ITmodule -> True; _ -> False) f -> do
       (n, w, e) <- moduleHead f args

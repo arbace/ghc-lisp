@@ -1,0 +1,10 @@
+module Lisp007 (
+        f, g
+    ) where
+f :: Int -> Int
+f = \case
+      0 -> 1
+      n -> n * f (n - 1)
+g :: [a] -> Maybe a
+g [] = Nothing
+g (x : _) = Just x

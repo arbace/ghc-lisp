@@ -1,0 +1,5 @@
+;; A type error: GHC reports it at the position in the .hsl file.
+(module Main [main])
+
+(:: main (IO ()))
+(= main (putStrLn (+ 1 True)))

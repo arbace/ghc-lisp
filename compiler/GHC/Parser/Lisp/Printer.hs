@@ -36,6 +36,7 @@ import Data.List.NonEmpty (NonEmpty(..), toList)
 import qualified Data.List.NonEmpty as NE
 import Data.Char (isAlpha, isUpper, isDigit)
 import Data.Maybe (isJust)
+import Data.List (intersperse)
 
 data PrintOpts = PrintOpts { prParens :: ParenOpts }
 
@@ -46,7 +47,7 @@ lispHeaderPragmas exts opts = vcat $
   [ parens (text ":options-ghc" <+> hsep (map (doubleQuotes . text) opts)) | not (null opts) ]
 
 lispModule :: PrintOpts -> HsModule GhcPs -> SDoc
-lispModule o m = vcat (punctuate (text "") (header ++ imports ++ decls))
+lispModule o m = vcat (intersperse (text "") (header ++ imports ++ decls))
   where
     header = case hsmodName m of
       Nothing -> []
@@ -55,7 +56,16 @@ lispModule o m = vcat (punctuate (text "") (header ++ imports ++ decls))
             (maybe [] (\w -> [warningTxt w]) (hsmodDeprecMessage (hsmodExt m)) ++
              maybe [] (\ies -> [ieList ies]) (hsmodExports m)) ]
     imports = [ vcat (map (importDecl . unLoc) (hsmodImports m)) | not (null (hsmodImports m)) ]
-    decls = map (decl o TopCtx . unLoc) (hsmodDecls m)
+    decls = map (vcat . map (decl o TopCtx . unLoc)) (groupDecls (hsmodDecls m))
+
+-- | Top-level declarations, grouped so that a type signature stays next to
+-- the binding it declares (no blank line between them).
+groupDecls :: [LHsDecl GhcPs] -> [[LHsDecl GhcPs]]
+groupDecls = \case
+  (s@(L _ (SigD _ (TypeSig _ _ names _))) : b@(L _ (ValD _ FunBind { fun_id = L _ n })) : rest)
+    | n `elem` map unLoc names -> [s, b] : groupDecls rest
+  (d : rest) -> [d] : groupDecls rest
+  [] -> []
 
 -------------------------------------------------------------------------------
 -- Layout helpers

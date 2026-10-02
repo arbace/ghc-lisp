@@ -1,0 +1,5 @@
+;; CPP is not supported in .hsl files (ghclisp/DESIGN.md D11).
+(:language CPP)
+(module Main [main])
+
+(= main (pure ()))

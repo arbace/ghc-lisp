@@ -1,0 +1,27 @@
+;; Extension-dependent lexemes: MagicHash names and literals, implicit
+;; parameters, overloaded labels, and \case.
+(:language MagicHash ImplicitParams OverloadedLabels LambdaCase DataKinds)
+(module Main [main])
+
+(import GHC.Exts [(Int I#) +# Int#])
+(import GHC.OverloadedLabels [(IsLabel ..)])
+
+(newtype Label (Label String))
+
+(instance (IsLabel "hello" Label)
+   (= fromLabel (Label "hello")))
+
+(:: plus (-> Int Int Int))
+(= (plus (I# a) (I# b)) (I# (+# a b)))
+
+(:: scaled (=> (:: ?factor Int) (-> Int Int)))
+(= (scaled x) (* x ?factor))
+
+(:: name (-> Label String))
+(= name (\case (-> (Label s) s)))
+
+(:: main (IO ()))
+(= main
+   (do (print (plus 2 3))
+       (print (let (= ?factor 10) (scaled 4)))
+       (putStrLn (name #hello))))

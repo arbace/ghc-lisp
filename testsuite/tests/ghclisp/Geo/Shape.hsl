@@ -1,0 +1,20 @@
+(:language LambdaCase)
+(module Geo.Shape [(Shape ..) area describe])
+
+(import Geo.Util [square])
+
+(data Shape
+   (Circle Double)
+   (Rect (:: w h Double))
+   (deriving Show))
+
+(:: area (-> Shape Double))
+(= area
+   (\case
+      (-> (Circle r) (* pi (square r)))
+      (-> (Rect w h) (* w h))))
+
+(:: describe (-> Shape String))
+(= (describe s)
+   (| (> (area s) 10) "big")
+   (| otherwise "small"))

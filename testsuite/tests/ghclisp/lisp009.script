@@ -1,0 +1,3 @@
+:load lisp009.hsl
+double 21
+:type double
