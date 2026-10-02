@@ -240,7 +240,7 @@ typeNeedsParens pos t = typeLevel t < required
       TFun -> 3
       TArg -> 4
       TCtxElem -> -1
-      TSigSubj -> 1
+      TSigSubj -> 0
 
 typeLevel :: HsType GhcPs -> Int
 typeLevel = \case

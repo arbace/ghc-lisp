@@ -368,8 +368,9 @@ decl o ctx = \case
   DerivD _ d -> derivDecl o d
   ValD _ b -> bind o b
   SigD _ s -> sig o ctx s
-  KindSigD _ (StandaloneKindSig _ n t) ->
-    form (text "type") [form (text "::") [lname n, sigType o t]]
+  KindSigD _ (StandaloneKindSig _ n (L _ (HsSig _ outer body))) ->
+    -- the kind may itself be a kind signature: type T :: a :: K
+    form (text "type") [form (text "::") [lname n, outerForall o specFlag outer (typ o TParen body)]]
   DefD _ d -> defaultDecl o d
   ForD _ d -> foreignDecl o d
   WarningD _ (Warnings _ ws) -> vcat (map (warnDecl . unLoc) ws)
@@ -543,7 +544,7 @@ derivClause o (HsDerivingClause _ mstrat (L _ tys)) = form (text "deriving") $
       Just (StockStrategy _) -> ([text "stock"], [])
       Just (AnyclassStrategy _) -> ([text "anyclass"], [])
       Just (NewtypeStrategy _) -> ([text "newtype"], [])
-      Just (ViaStrategy (XViaStrategyPs _ t)) -> ([], [text "via", sigType o t])
+      Just (ViaStrategy (XViaStrategyPs _ t)) -> ([], [text "via", sigTypeAt o TParen t])
 
 conDecl :: PrintOpts -> ConDecl GhcPs -> SDoc
 conDecl o0 = \case
@@ -655,7 +656,7 @@ familyDecl o ctx (FamilyDecl _ info top n tvs fix (L _ res) minj) =
       Just (L _ (InjectivityAnn _ l rs)) -> form (text "|") [lname l, text "->", hsep (map lname rs)]
     eqns = case info of
       ClosedTypeFamily Nothing -> [form (text "where") [text ".."]]
-      ClosedTypeFamily (Just es) -> [formV (text "where") (map (famEqn o (typ o TTop) . unLoc) es)]
+      ClosedTypeFamily (Just es) -> [formV (text "where") (map (famEqn o (typ o TParen) . unLoc) es)]
       _ -> []
 
 famEqn :: PrintOpts -> (rhs -> SDoc) -> FamEqn GhcPs rhs -> SDoc
@@ -691,7 +692,7 @@ instDecl o ctx = \case
         kw' = if ctx == InstCtx then kw else kw <+> text "instance"
     in dataDefn o kw' (outerForall o (const id) bndrs (famLhs o n pats fix)) defn
   TyFamInstD _ (TyFamInstDecl _ eqn) ->
-    form (text (if ctx == InstCtx then "type" else "type instance")) [famEqn o (typ o TTop) eqn]
+    form (text (if ctx == InstCtx then "type" else "type instance")) [famEqn o (typ o TParen) eqn]
 
 overlap :: Maybe (LocatedA (OverlapMode GhcPs)) -> SDoc
 overlap = \case
@@ -714,7 +715,7 @@ derivDecl o (DerivDecl (mwarn, _) (HsWC _ ty) mstrat moverlap) =
       Just (StockStrategy _) -> [text "stock"]
       Just (AnyclassStrategy _) -> [text "anyclass"]
       Just (NewtypeStrategy _) -> [text "newtype"]
-      Just (ViaStrategy (XViaStrategyPs _ t)) -> [text "via", sigType o t]
+      Just (ViaStrategy (XViaStrategyPs _ t)) -> [text "via", sigTypeAt o TParen t]
 
 -------------------------------------------------------------------------------
 -- Bindings and signatures
@@ -861,8 +862,11 @@ sig o ctx = \case
 -- Types
 
 sigType :: PrintOpts -> LHsSigType GhcPs -> SDoc
-sigType o (L _ (HsSig _ outer body)) = case outer of
-  HsOuterImplicit _ -> typ o TTop body
+sigType o = sigTypeAt o TTop
+
+sigTypeAt :: PrintOpts -> TPos -> LHsSigType GhcPs -> SDoc
+sigTypeAt o pos (L _ (HsSig _ outer body)) = case outer of
+  HsOuterImplicit _ -> typ o pos body
   HsOuterExplicit _ bs -> form (text "forall") (map (tyVarBndr o specFlag . unLoc) bs ++ [typ o TTop body])
 
 forallTele :: PrintOpts -> HsForAllTelescope GhcPs -> SDoc -> SDoc

@@ -368,7 +368,10 @@ nameAt ns f = case f of
     tupleCon b n = case n of
       Form _ (FAtom (ITinteger il)) ->
         let arity = fromIntegral (il_value il)
-        in pure (at f (byNS (getRdrName (tupleDataCon b arity)) (getRdrName (tupleTyCon b arity))))
+        in case ns of
+             NSExpr -> pure (at f (getRdrName (tupleDataCon b arity)))
+             -- the tuple type constructor honours ListTuplePuns
+             NSType -> at f <$> mkTupleSyntaxTycon b arity
       _ -> failAt n "expected an arity"
 
 varName' :: Form -> P (LocatedN RdrName)
@@ -1192,7 +1195,7 @@ derivClauseP f = do
   case rest of
     [tys] -> mk strat tys
     [tys, v, t] | isName "via" v || isTok (\case ITvia -> True; _ -> False) v -> do
-      vt <- sigTypeP t
+      vt <- hsTypeToHsSigType <$> typ TParen t
       mk (Just (at v (ViaStrategy (XViaStrategyPs noAnn vt)))) tys
     _ -> failAt f "malformed deriving clause"
   where
@@ -1231,7 +1234,8 @@ typeDecl ctx f args = case args of
   (hd : r : rest) | ctx == ClassCtx, isFamilyResult r -> (: []) <$> familyDecl ctx f OpenTypeFamily (hd : r : rest)
   [s] | Just [n, k] <- tokForm (\case ITdcolon _ -> True; _ -> False) s -> do
     nm <- nameAt NSType n
-    kd <- sigTypeP k
+    -- the kind may itself be a kind signature: type T :: a :: K
+    kd <- hsTypeToHsSigType <$> typ TParen k
     pure [at f (KindSigD noExtField (StandaloneKindSig noAnn nm kd))]
   [hd, rhs]
     | ctx == ClassCtx -> do
@@ -1295,7 +1299,8 @@ famEqnP f = do
   case tokForm (\case ITequal -> True; _ -> False) eqF of
     Just [l, r] -> do
       lhs <- typ TTop l
-      rhs <- typ TTop r
+      -- the right-hand side may be a kind signature: F Int = Any :: j -> j
+      rhs <- typ TParen r
       mkTyFamInstEqn (formSpan f) bndrs lhs rhs noAnn
     _ -> failAt f "expected (= lhs rhs)"
 
@@ -1358,7 +1363,7 @@ standaloneDeriving f args0 = do
             | isName "anyclass" s || isTok (\case ITanyclass -> True; _ -> False) s -> pure (Just (at s (AnyclassStrategy noAnn)), r)
             | isTok (\case ITnewtype -> True; _ -> False) s -> pure (Just (at s (NewtypeStrategy noAnn)), r)
     (v : t : r) | isName "via" v || isTok (\case ITvia -> True; _ -> False) v -> do
-      vt <- sigTypeP t
+      vt <- hsTypeToHsSigType <$> typ TParen t
       pure (Just (at v (ViaStrategy (XViaStrategyPs noAnn vt))), r)
     r -> pure (Nothing, r)
   case args1 of
@@ -1449,6 +1454,7 @@ typeForm f = case formNode f of
   FKeyword _ -> failAt f "unexpected keyword in a type"
   FList [h] | isKw "tuple" h -> at f <$> mkTupleSyntaxTy noAnn [] noAnn
             | isKw "utuple" h -> pure (at f (HsTupleTy noAnn HsUnboxedTuple []))
+  FList [h] | isKw "record" h -> pure (at f (XHsType (HsRecTy noAnn (L (formSpan f) []))))
   FList [_] -> failAt f "a one-element list is not a type; write the type itself"
   FList _ | isNameForm f -> do
     n <- nameAt NSType f
@@ -1639,6 +1645,7 @@ exprForm f = case formNode f of
             | isTok (\case ITlcases -> True; _ -> False) h -> lamCase f LamCases []
             | isKw "tuple" h -> pure (at f (ExplicitTuple noAnn [] Boxed))
             | isKw "utuple" h -> pure (at f (ExplicitTuple noAnn [] Unboxed))
+  FList [h] | isKw "quote-decls" h -> keywordExpr f "quote-decls" []
   FList [_] -> failAt f "a one-element list is not an expression; write (:paren e) for parentheses"
   FList (h : args) -> case headOf h of
     HTok ITlam -> lambda f args
@@ -1688,8 +1695,14 @@ exprForm f = case formNode f of
       body <- expr ETop (last args)
       pure (at f (HsQual noExtField (at f (HsContext noAnn cs)) body))
     HTok (ITrarrow _) | [a, b] <- args -> do
-      a' <- expr ETop a
-      b' <- expr ETop b
+      -- type syntax in a term (RequiredTypeArguments): * is HsStar here
+      let operand x
+            | isTok (\case ITstar _ -> True; _ -> False) x = do
+                star <- getBit StarIsTypeBit
+                if star then pure (at x (HsStar noAnn)) else expr ETop x
+            | otherwise = expr ETop x
+      a' <- operand a
+      b' <- operand b
       pure (at f (HsFunArr noExtField (HsModifiedFunArr noExtField [] (HsStandardArr (EpArrow noAnn))) a' b'))
     HKeyword k -> keywordExpr f (unpackFS k) args
     HSym s
@@ -1964,9 +1977,11 @@ spliceForm f h args
   | otherwise = quasiQuote f args
 
 opExpr :: Form -> P (LHsExpr GhcPs)
-opExpr op = do
-  n <- nameAt NSExpr op
-  pure (at op (HsVar noExtField n))
+opExpr op
+  | isUnderscore op = pure (at op (HsHole (HoleVar (at op unnamedHoleRdrName))))
+  | otherwise = do
+      n <- nameAt NSExpr op
+      pure (at op (HsVar noExtField n))
 
 -- | @(op a b c)@: the chain @a op b op c@, left-nested, unresolved.
 exprOpChain :: Form -> Form -> [Form] -> P (LHsExpr GhcPs)

@@ -77,7 +77,7 @@ Notation: `x?` means optional, `x*` zero or more, `x+` one or more.
 | `( )` `[ ]` | list, vector |
 | `{ }` `#{ }` `#tag` | read, but **reserved**: the parser rejects them |
 | `` ` `` | reserved (error) |
-| string `"..."` | Haskell string grammar exactly, including `\&`, `\^A`, `\SOH`, and gaps (`\   \`). The literal keeps its source text verbatim. `"..."#` with `MagicHash` is a primitive string. Multiline strings (`"""`) are not read yet (D2). |
+| string `"..."` | Haskell string grammar exactly, including `\&`, `\^A`, `\SOH`, and gaps (`\   \`). The literal keeps its source text verbatim. `"..."#` with `MagicHash` is a primitive string. Multiline strings (`"""`, `MultilineStrings`) are read by GHC's lexer as in Haskell. |
 | char `'x'` | Haskell char grammar. `'x'#` is a primitive char. |
 | number | Haskell number grammar exactly: decimal, `0x`, `0o`, `0b` (`BinaryLiterals`), `_` separators (`NumericUnderscores`), floats, hex floats (`HexFloatLiterals`), `MagicHash` suffixes `#` / `##`, and `ExtendedLiterals` suffixes (`123#Int8`). Source text verbatim. A leading `-` (`-5`) is a negative literal under `NegativeLiterals`, and otherwise reads as `(- 5)`. |
 | keyword | `:` then a letter or `_`, then name characters: `:tuple`, `:_`, `:section-l`. Used as heads, the `:_` marker, and flags. |

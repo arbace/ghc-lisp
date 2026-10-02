@@ -101,7 +101,11 @@ parseHsFile hsc_env file = do
       let loc = mkRealSrcLoc (mkFastString file) 1 1
       case unP parseModule (initParserState popts buf loc) of
         PFailed pst -> throwErrors (initSourceErrorContext dflags) (GhcPsMessage <$> getPsErrorMessages pst)
-        POk _ m -> pure (dflags, map unLoc opts, m)
+        POk pst m
+          -- the parser can record errors and still return a tree
+          | errs <- getPsErrorMessages pst, not (isEmptyMessages errs) ->
+              throwErrors (initSourceErrorContext dflags) (GhcPsMessage <$> errs)
+          | otherwise -> pure (dflags, map unLoc opts, m)
 
 -- | Print a parsed module as Lisp, with its header pragmas and comments.
 printLisp :: DynFlags -> [String] -> Located (HsModule GhcPs) -> String
@@ -278,22 +282,15 @@ firstDiff as bs = go (1 :: Int) as bs
 -- (SPEC.md §11): one constructor per line, with source positions,
 -- exact-print annotations and the source text of pragma openers blanked.
 astDump :: Data a => a -> String
-astDump = unlines . go 0
+astDump x0 = unlines (go 0 x0 [])
   where
-    go :: forall b. Data b => Int -> b -> [String]
-    go d x
-      | isAnnotation x = []
+    -- Lines are accumulated (go d x rest = the lines of x, then rest), so
+    -- deep trees cost no more than wide ones.
+    go :: forall b. Data b => Int -> b -> [String] -> [String]
+    go d x rest
+      | isAnnotation x = rest
       -- lists are flat, so that long lists don't nest (and indent) deeply
-      | showConstr (toConstr x) == "(:)" =
-          (replicate d ' ' ++ "[") : listElems (d + 1) x
-      | otherwise = go' d x
-    listElems :: forall b. Data b => Int -> b -> [String]
-    listElems d x = case showConstr (toConstr x) of
-      "(:)" -> concat (gmapQi 0 (go d) x : [gmapQi 1 (listElems d) x])
-      _ -> []
-    go' :: forall b. Data b => Int -> b -> [String]
-    go' d x
-      | isAnnotation x = []
+      | showConstr (toConstr x) == "(:)" = (indent d ++ "[") : listElems (d + 1) x rest
       | Just (s :: String) <- cast x = leaf (show s)
       | Just (fs :: FastString) <- cast x = leaf (show (unpackFS fs))
       | Just (t :: HText) <- cast x = leaf (show (unpackHText t))
@@ -310,11 +307,20 @@ astDump = unlines . go 0
       | otherwise =
           let c = toConstr x
           in case constrRep c of
-               AlgConstr _ -> (indent ++ showConstr c) : concat (gmapQ (go (d + 1)) x)
+               AlgConstr _ -> (indent d ++ showConstr c) : children (d + 1) x rest
                _ -> leaf (showConstr c)
       where
-        indent = replicate d ' '
-        leaf str = [indent ++ str]
+        leaf str = (indent d ++ str) : rest
+    -- the children of x, each through go, then rest
+    children :: forall b. Data b => Int -> b -> [String] -> [String]
+    children d x rest = foldr (\f acc -> f acc) rest (gmapQ (\c -> go d c) x)
+    listElems :: forall b. Data b => Int -> b -> [String] -> [String]
+    listElems d x rest = case showConstr (toConstr x) of
+      "(:)" -> gmapQi 0 (\h -> go d h) x (gmapQi 1 (\t -> listElems d t) x rest)
+      _ -> rest
+    -- past 100 levels the depth is written as a number
+    indent d | d < 100 = replicate d ' '
+             | otherwise = replicate 100 ' ' ++ show d ++ ":"
     space o
       | isVarOcc o = "v"
       | isTvOcc o = "tv"
