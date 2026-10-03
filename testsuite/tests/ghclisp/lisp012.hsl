@@ -1,0 +1,7 @@
+
+(module Main [main])
+
+(import Lisp012A [evens])
+
+(:: main (IO ()))
+(= main (print (evens "a boot file in ghc-lisp")))

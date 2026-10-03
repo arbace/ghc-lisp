@@ -62,7 +62,7 @@ The goal is painless merges from upstream GHC.
 - Behavioral test: `ghclisp/run-corpus.sh _build/stage1/bin/ghc` (about
   10 minutes).
 - Testsuite: `hadrian/build -j --flavour=quick --freeze1 test
-  --test-root-dirs=testsuite/tests/ghclisp` (11 tests).
+  --test-root-dirs=testsuite/tests/ghclisp` (12 tests).
 - Haddock: `ghc --lisp-check -haddock FILE.hs` also compares the attached
   documentation (about 86% of source files today; see DESIGN.md).
 - Vim: `ghclisp/vim/test.sh _build/stage1/bin/ghc FILE.hs...` checks that

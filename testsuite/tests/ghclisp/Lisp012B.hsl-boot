@@ -1,0 +1,4 @@
+
+(module Lisp012B [odds])
+
+(:: odds (-> [a] [a]))
