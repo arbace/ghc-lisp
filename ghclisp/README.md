@@ -34,7 +34,8 @@ runghc Main.hsl
 ghci Foo.hsl                 # or :load Foo.hsl
 ```
 
-The finder looks for `M.hsl` wherever it looks for `M.hs`. Errors and
+The finder looks for `M.hsl` wherever it looks for `M.hs`, and for a
+boot file `M.hsl-boot` beside `M.hsl`. Errors and
 warnings point into the `.hsl` file. Language extensions and options go at
 the top of the file, as forms: `(:language LambdaCase GADTs)`,
 `(:options-ghc "-Wall")`. CPP is not supported in `.hsl` files.

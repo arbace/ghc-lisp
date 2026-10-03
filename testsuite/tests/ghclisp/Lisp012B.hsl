@@ -1,0 +1,8 @@
+
+(module Lisp012B [odds])
+
+(import Lisp012A [evens])
+
+(:: odds (-> [a] [a]))
+(= (odds []) [])
+(= (odds (: _ xs)) (evens xs))

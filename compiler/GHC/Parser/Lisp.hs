@@ -126,9 +126,10 @@ lispHeaderOptions opts buf loc = concatMap opt (readFormsWhile isHeader opts buf
 -------------------------------------------------------------------------------
 -- Driver hooks (each called from a one-line `ghc-lisp:` hook upstream)
 
--- | Is this a ghc-lisp source file?
+-- | Is this a ghc-lisp source file? A boot file counts too: the finder
+-- looks for @M.hsl-boot@ beside @M.hsl@.
 isLispFile :: FilePath -> Bool
-isLispFile f = ".hsl" `isSuffixOf` f
+isLispFile f = ".hsl" `isSuffixOf` f || ".hsl-boot" `isSuffixOf` f
 
 -- | Run GHC's parser, or the ghc-lisp parser for a @.hsl@ source file.
 -- Hook in "GHC.Driver.Main.Passes" (the module parse) and

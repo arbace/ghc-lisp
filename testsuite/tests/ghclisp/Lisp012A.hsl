@@ -1,0 +1,9 @@
+
+(module Lisp012A [evens])
+
+(import :source Lisp012B [odds])
+
+;;| The even-indexed elements, by mutual recursion with 'odds'.
+(:: evens (-> [a] [a]))
+(= (evens []) [])
+(= (evens (: x xs)) (: x (odds xs)))
