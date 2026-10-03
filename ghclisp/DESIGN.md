@@ -137,7 +137,7 @@ round-trip comparison) go into `ghclisp/SPEC.md`, written next.
 | 6. Tooling | `ghc --hs2lisp` (keeps comments; Haddock comments become `;;|`, `;;^`, ...), `ghc --lisp2hs` (GHC's pretty-printer), `ghc --lisp-check`; `;;|` comments reach `-haddock` through GHC's own Haddock pass (with `-haddock`, 4,185 of 4,863 source files round-trip including their docs). Vim and Neovim: `ghclisp/vim`. Tests in `testsuite/tests/ghclisp`. |
 
 Upstream hooks, all marked (`git grep 'ghc-lisp:'`): the module list in
-`compiler/ghc.cabal.in`; `GHC.Driver.Phases` (the `.hsl` suffix),
+`compiler/ghc.cabal.in`; `GHC.Driver.Phases` (the `.hsl` and `.hsl-boot` suffixes),
 `GHC.Unit.Finder` (search `.hsl`), `GHC.Parser.Header` (header parse and
 file options), `GHC.Driver.Main.Passes` (module parse); the mode flags and
 dispatch in `ghc/` (`--hs2lisp`, `--lisp2hs`, `--lisp-check`).

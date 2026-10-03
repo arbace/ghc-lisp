@@ -184,6 +184,7 @@ startPhase "lhsig"    = Unlit HsigFile
 startPhase "hs"       = Cpp   HsSrcFile
 startPhase "hsl"      = Cpp   HsSrcFile -- ghc-lisp: .hsl sources
 startPhase "hs-boot"  = Cpp   HsBootFile
+startPhase "hsl-boot" = Cpp   HsBootFile -- ghc-lisp: .hsl boot files
 startPhase "hsig"     = Cpp   HsigFile
 startPhase "hscpp"    = HsPp  HsSrcFile
 startPhase "hspp"     = Hsc   HsSrcFile
@@ -255,6 +256,7 @@ haskellish_user_src_suffixes =
   haskellish_sig_suffixes ++ haskellish_boot_suffixes ++ [ "hs", "lhs" ]
     ++ [ "hsl" ] -- ghc-lisp: .hsl sources
 haskellish_boot_suffixes     = [ "hs-boot", "lhs-boot" ]
+    ++ [ "hsl-boot" ] -- ghc-lisp: .hsl boot files
 haskellish_sig_suffixes      = [ "hsig", "lhsig" ]
 backpackish_suffixes         = [ "bkp" ]
 bytecode_suffixes            = [ "gbc" ]

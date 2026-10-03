@@ -108,6 +108,7 @@ top    := (import ...) | decl            ; imports first, as in Haskell
 | `hsmodExports` | `[item*]` after the name; omitted = Nothing; `[]` = `Just []` | |
 | `hsmodDeprecMessage` | `(:deprecated "msg")`, `(:warning in? "cat"? "msg")` before the exports | the same shapes as §6 warning pragmas |
 | `hsmodHaddockModHeader` | `;;|` comment before `(module ...)` | |
+| boot files | a `.hsl-boot` file is a boot file written in ghc-lisp, read like a `.hsl` file; `(import :source M)` imports it | as `.hs-boot` beside `.hs` |
 | header pragmas | `(:language ...)`, `(:options-ghc ...)`, `(:options-haddock ...)` before everything else | D10. Not part of the AST; the downsweep reads them. `CPP` is rejected (D11). |
 
 **Export items** (`IE`):

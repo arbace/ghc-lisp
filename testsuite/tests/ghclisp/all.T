@@ -41,3 +41,11 @@ test('lisp011', [extra_files(['lisp011.hsl']), extra_hc_opts('-haddock')],
 # A boot file in ghc-lisp: the finder looks for M.hsl-boot beside M.hsl.
 test('lisp012', [extra_files(['Lisp012A.hsl', 'Lisp012B.hsl', 'Lisp012B.hsl-boot'])],
      multimod_compile_and_run, ['lisp012.hsl', ''])
+
+# A ghc-lisp boot file compiled on its own (one-shot mode), then the
+# modules that use it.
+test('lisp013', [extra_files(['Lisp012A.hsl', 'Lisp012B.hsl', 'Lisp012B.hsl-boot', 'lisp012.hsl'])],
+     run_command,
+     ['{compiler} -c Lisp012B.hsl-boot && {compiler} -c Lisp012A.hsl && '
+      '{compiler} -c Lisp012B.hsl && {compiler} -c lisp012.hsl && '
+      '{compiler} Lisp012A.o Lisp012B.o lisp012.o -o lisp013 && ./lisp013'])
